@@ -43,7 +43,8 @@ test("browser.open has one permission-gated, awaitable route from every plugin s
 
   const appOpenBrowser = app.slice(app.indexOf("const openBrowser ="), app.indexOf("const closeBrowser ="));
   assert.equal(appOpenBrowser.match(/await browserApi\.open\(url\)/g)?.length, 1);
-  assert.match(appOpenBrowser, /await persistSettings\(\{ browserCanvas \}\)/);
+  assert.match(appOpenBrowser, /await window\.canvasTTY\.workspace\.setBrowserCanvas\(browserCanvas\)/);
+  assert.doesNotMatch(appOpenBrowser, /await persistSettings\(\{ browserCanvas \}\)/);
   assert.doesNotMatch(appOpenBrowser, /await saveSettings\(\{ browserCanvas \}\)/);
   assert.match(app, /const persistSettings = useCallback\(async/);
   assert.match(app, /const saveSettings = useCallback\(async/);

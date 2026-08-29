@@ -75,9 +75,14 @@ test("PTY output is batched before crossing into the renderer", async () => {
 
 test("session metadata revisions advance before lifecycle events cross IPC", async () => {
   const source = await readFile(terminalManagerPath, "utf8");
+  const emitSession = source.slice(
+    source.indexOf("private emitSession("),
+    source.indexOf("private spawnProcess(")
+  );
 
   assert.match(source, /revision: 0/);
-  assert.match(source, /metadata\.revision \+= 1;\s*this\.emit\(IPC\.terminalSession/);
+  assert.match(emitSession, /metadata\.revision \+= 1;\s*const event = structuredClone\(metadata\)/);
+  assert.match(emitSession, /this\.emit\(IPC\.terminalSession, \{ session: event \}\)/);
 });
 
 test("terminal viewport keeps the palette background after row-sized fits", async () => {
