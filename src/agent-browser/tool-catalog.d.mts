@@ -10,6 +10,7 @@ export interface McpToolDefinition {
 export const TOOL_DEFINITIONS: readonly McpToolDefinition[];
 export const APPROVED_BROWSER_TOOL_NAMES: readonly string[];
 export function isApprovedBrowserTool(value: unknown): value is string;
+export function isProjectActionTool(value: unknown): value is string;
 export function validateToolArguments(toolName: unknown, value: unknown):
   | { ok: true; value: Record<string, unknown> }
   | { ok: false; error: string };

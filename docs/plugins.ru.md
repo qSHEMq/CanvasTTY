@@ -100,6 +100,8 @@ host.onStorageChange(listener) сообщает всем открытым пов
 | `media:library` | `media.*` | Только выбранные пользователем музыкальные папки; абсолютные пути не раскрываются, аудио отдаётся seekable-потоками `canvastty-media://` |
 | `playlists:read` | `playlists.list`, `playlists.read` | Читает `.m3u`, `.m3u8` и `.pls` в разрешённой музыкальной папке, а `.json` — только в её `Playlists/`, до 4 МБ на файл |
 | `playlists:write` | `playlists.write` | Атомарно записывает плейлист в каталог `Playlists/` разрешённой папки, до 4 МБ |
+| `actions:read` | `actions.list` | Показывает actions активного workspace, у которых внешняя policy не равна `deny`; точные определения принадлежат host |
+| `actions:run-approved` | `actions.run` | Запрашивает существующий action по неизменяемому ID; `ask` всё равно требует подтверждения, а shell, cwd, arguments и approval token не пересекают plugin boundary |
 | `network` | browser `fetch` | Разрешает HTTPS и loopback в CSP; учётные данные CanvasTTY не прикрепляются |
 
 Permission не открывает generic IPC. Неизвестные методы и permissions отклоняются.
@@ -132,6 +134,8 @@ await host.request("launcher.open", { provider: "codex" });
 await host.canvas.open("notes");
 await host.request("window.open", { contributionId: "focus" });
 await host.request("browser.open", { url: "http://localhost:9210" });
+const actions = await host.actions.list();
+if (actions[0]) await host.actions.run(actions[0].id, "refresh-once");
 
 const library = await host.media.pickLibrary();
 if (library) {
@@ -144,7 +148,7 @@ if (library) {
 }
 ```
 
-Поддержаны `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*` и `playlists.*`. `canvas.open` открывает или фокусирует `canvas-app` того же плагина и по возможности ставит его рядом с вызывающей карточкой. `browser.open` завершается только после создания или фокусировки Browser-card workspace и одной навигации; принимаются лишь нормализованные HTTP(S)-URL, а не текст для поиска, `file:`, `data:`, `javascript:`, `about:` или URL с учётными данными. `window.open` может открыть только contribution типа `window` из того же manifest.
+Поддержаны `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*`, `playlists.*` и `actions.*`. `canvas.open` открывает или фокусирует `canvas-app` того же плагина и по возможности ставит его рядом с вызывающей карточкой. `browser.open` завершается только после создания или фокусировки Browser-card workspace и одной навигации; принимаются лишь нормализованные HTTP(S)-URL, а не текст для поиска, `file:`, `data:`, `javascript:`, `about:` или URL с учётными данными. `window.open` может открыть только contribution типа `window` из того же manifest. `actions.run` принимает только ID host-defined action и необязательный idempotency key; подробнее в [Workspaces и Project Actions](PROJECT_ACTIONS.ru.md#граница-плагинов).
 
 Используйте `storage` для несекретных JSON-настроек, а `secrets` — только для OAuth-токенов, API-ключей и других учётных данных. Поддерживается до 32 строковых ключей, 16 КБ на значение и 64 КБ на плагин. Секреты удаляются при uninstall и никогда не сохраняются в plaintext; если ОС не предоставляет защищённое шифрование, вызов явно завершается ошибкой.
 

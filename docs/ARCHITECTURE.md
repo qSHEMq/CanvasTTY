@@ -15,6 +15,8 @@ preload bridge (contextBridge)
     ▼
 Electron main process
     ├── SettingsStore  → validated, atomic JSON persistence
+    ├── WorkspaceIndexStore / WorkspaceStore → versioned workspace catalog and documents
+    ├── ActionSourceRegistry / ActionRunManager → bounded discovery and observable action runs
     ├── TerminalManager → node-pty lifecycle, bounded scrollback, and output batching
     ├── LimitsService  → sanitized provider-limit adapters and cache
     ├── PluginManager  → GitHub install, manifest validation, assets, permissions, storage
@@ -36,6 +38,8 @@ Electron main process
 - `src/main/services/TerminalManager.ts` is the source of truth for live session state and PTY buffers. It keeps scrollback in a bounded chunk buffer and coalesces PTY data into 16ms IPC batches so clear/redraw sequences reach xterm together. A plain terminal starts `idle`; an agent stays `unavailable` until its provider emits a machine-readable lifecycle signal. Codex, Claude Code, Qwen Code, Kimi Code, OpenCode, Hermes, and Grok Build then transition through `idle`, `working`, and `needs_approval` from provider hooks; exact Claude/Qwen OSC 0/2 markers remain a compatibility fallback. Human-readable terminal text and PTY existence are never treated as activity. Process exit provides only `done` or `failed`. An exited PTY may be restarted under the same session ID while preserving its card, bounds, title, and scrollback.
 - `src/main/services/LimitsService.ts` reads Codex through the installed CLI's app-server protocol and Claude, Kimi, OpenCode Go, and Grok Build through their provider usage or billing endpoints. Qwen Code is multi-provider and exposes no provider-neutral read-only quota protocol, so its adapter reports `cli-not-found` or `unsupported-protocol` and never invents percentages. Provider credentials are read only inside the trusted main process, sent only to the matching provider over HTTPS, and never logged or exposed over IPC. The service owns timeout, structural normalization, caching, stale fallback, and subprocess cleanup; raw provider responses never cross IPC.
 - `src/main/services/SettingsStore.ts` normalizes every update and persists through a serialized atomic write.
+- `src/main/services/WorkspaceIndexStore.ts` owns the active-workspace catalog and reusable presets. `WorkspaceStore.ts` migrates legacy canvas geometry, normalizes every versioned document, serializes mutations, and writes atomically. Persisted terminal cards use stable object IDs that are independent from ephemeral PTY session IDs, so startup can restore truthful stopped placeholders.
+- `src/main/services/ActionSourceRegistry.ts` performs bounded, read-only discovery of known project command sources without evaluating repository code. `ActionRunManager.ts` owns action DAG execution, PTY association, health checks, browser preview, concurrency, idempotency, approvals, stop/retry, and bounded structured history. Agent/plugin callers supply only an action ID; the host resolves the immutable definition and requester-bound policy.
 - `src/main/services/PluginManager.ts` installs ready-to-run static repositories without executing package scripts, rejects symlinks and oversized packages, persists the enabled registry, serves only contained package files, and enforces per-plugin permissions/storage quotas.
 - `src/main/services/PluginSecretsService.ts` serializes per-plugin secret writes, encrypts the complete bounded payload through Electron `safeStorage`, rejects plaintext-only backends, and removes each encrypted file on uninstall.
 - `src/main/services/PluginMediaService.ts` persists per-plugin grants only after a native folder choice, hides absolute paths, skips symlinks, and serves contained audio with HTTP Range semantics. Playlist reads stay inside granted libraries; writes are bounded and atomic under the library's `Playlists/` directory.
@@ -69,9 +73,14 @@ App
 │   │   ├── homeModel      pure derivation of limit/active-session rows
 │   │   └── HomeMediaWidget independent pick/replace/remove control
 │   ├── TerminalCard       one live xterm view, selection, rename, drag, resize, and snap behavior
+│   ├── TerminalPlaceholder persisted stopped card with explicit start/remove actions
+│   ├── GroupFrame         movable, collapsible, lockable spatial grouping
 │   ├── PluginCanvasCard   sandboxed plugin app with canvas bounds and semantic summary
 │   └── BrowserCard        trusted browser chrome and canvas geometry for the native WebContentsView
 ├── AgentLaunchDialog      fixed provider + folder + profile + launch
+├── ActionsPanel           discovery, editor, approval, runs, stop, and retry
+├── WorkspacePanel         layout, views, templates, presets, and transfer
+├── CommandPalette         searchable `Ctrl/Cmd+Shift+P` actions
 └── SettingsPanel          General, Appearance, Controls, Browser, and Plugins
     └── PluginSettingsSection install preview, permissions, registry, and contributions
 ```

@@ -269,6 +269,18 @@ async function handleRequest({
     onOpenLauncher(provider);
     return null;
   }
+  if (method === "actions.list") {
+    requirePermission(plugin, "actions:read");
+    return window.canvasTTY.plugins.actionsList(pluginId);
+  }
+  if (method === "actions.run") {
+    requirePermission(plugin, "actions:run-approved");
+    return window.canvasTTY.plugins.actionsRun(
+      pluginId,
+      stringParam(params.id, "id"),
+      typeof params.idempotencyKey === "string" ? params.idempotencyKey : undefined
+    );
+  }
   if (method === "external.open") {
     requirePermission(plugin, "external:open");
     await window.canvasTTY.plugins.openExternal(pluginId, stringParam(params.url, "url"));

@@ -4,16 +4,36 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron"
 import type { IpcMainEvent, IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import type {
   AppSettings,
+  BrowserCanvasState,
   BrowserCommand,
+  CameraState,
   CreateSessionRequest,
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
+  PluginCanvasInstance,
+  ProjectActionInput,
+  ProjectActionUpdate,
   ProviderId,
-  SessionBounds
+  Point,
+  RunProjectActionRequest,
+  SessionBounds,
+  WorkspaceTerminal,
+  WorkspaceTerminalBoundsRequest,
+  WorkspaceArrangeMode,
+  WorkspaceCreateInput,
+  WorkspaceGroupInput,
+  WorkspaceGroupUpdate,
+  WorkspacePresetInput,
+  WorkspaceSavedViewInput,
+  TerminalTemplateInput,
+  TerminalTemplateUpdate
 } from "../../shared/contracts";
 import { IPC } from "../../shared/contracts";
 import { observeWindowState, readWindowState } from "../windowState";
 import type { SettingsStore } from "../services/SettingsStore";
+import type { WorkspaceStore } from "../services/WorkspaceStore";
+import type { ActionRunManager } from "../services/ActionRunManager";
+import type { ActionSourceRegistry } from "../services/ActionSourceRegistry";
 import type { TerminalManager } from "../services/TerminalManager";
 import type { LimitsService } from "../services/LimitsService";
 import type { PluginManager } from "../services/PluginManager";
@@ -36,6 +56,9 @@ const MEDIA_MIME: Record<string, string> = {
 
 interface Dependencies {
   settings: SettingsStore;
+  workspace: WorkspaceStore;
+  actionRuns: ActionRunManager;
+  actionSources: ActionSourceRegistry;
   terminals: TerminalManager;
   limits: LimitsService;
   plugins: PluginManager;
@@ -56,6 +79,9 @@ interface Dependencies {
 
 export function registerIpc({
   settings,
+  workspace,
+  actionRuns,
+  actionSources,
   terminals,
   limits,
   plugins,
@@ -93,6 +119,226 @@ export function registerIpc({
     const next = await settings.update(patch);
     applyBrowserSettings(next);
     return next;
+  });
+  ipcMain.handle(IPC.workspaceCatalog, (event) => { assertMainRenderer(event, getMainWindow); return workspace.catalog(); });
+  ipcMain.handle(IPC.workspaceGet, (event) => { assertMainRenderer(event, getMainWindow); return workspace.get(); });
+  ipcMain.handle(IPC.workspaceCreate, (event, input: WorkspaceCreateInput) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.createWorkspace(input);
+  });
+  ipcMain.handle(IPC.workspaceSwitch, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Workspace identifier is invalid.");
+    return workspace.switchWorkspace(id);
+  });
+  ipcMain.handle(IPC.workspaceDuplicate, (event, id: unknown, title?: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string" || (title !== undefined && typeof title !== "string")) throw new Error("Workspace duplicate request is invalid.");
+    return workspace.duplicateWorkspace(id, title);
+  });
+  ipcMain.handle(IPC.workspaceDelete, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Workspace identifier is invalid.");
+    if (terminals.list().some((session) => session.workspaceId === id && session.exitCode === null)) {
+      throw new Error("Stop live terminals in this workspace before deleting it.");
+    }
+    return workspace.deleteWorkspace(id);
+  });
+  ipcMain.handle(IPC.workspaceRename, (event, title: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof title !== "string") throw new Error("Workspace title is invalid.");
+    return workspace.renameWorkspace(title);
+  });
+  ipcMain.handle(IPC.workspaceProjectRoot, (event, path: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof path !== "string") throw new Error("Workspace project root is invalid.");
+    return workspace.setProjectRoot(path);
+  });
+  ipcMain.handle(IPC.workspaceCamera, (event, camera: CameraState) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.setCamera(camera);
+  });
+  ipcMain.handle(IPC.workspaceStartTerminal, async (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Workspace terminal identifier is invalid.");
+    const active = workspace.get();
+    const existing = terminals.findByWorkspaceObject(id, active.id);
+    if (existing) return existing;
+    const terminal = workspace.terminal(id, active.id);
+    if (!terminal) throw new Error("Workspace terminal does not exist.");
+    if (terminal.actionId) {
+      const action = workspace.action(terminal.actionId, active.id);
+      if (!action) throw new Error("The project action for this terminal no longer exists.");
+      const result = await actionRuns.run({ id: action.id, position: terminal.position, terminalObjectId: terminal.id, requester: "user" });
+      if (result.needsApproval || !result.session) throw new Error("Review this action in Project Actions before starting it.");
+      return result.session;
+    }
+    return terminals.create({
+      provider: terminal.provider,
+      profile: terminal.profile,
+      cwd: terminal.cwd,
+      position: terminal.position,
+      title: terminal.title
+    }, {
+      workspaceId: active.id,
+      workspaceObjectId: terminal.id,
+      size: terminal.size,
+      titleCustomized: terminal.titleCustomized
+    });
+  });
+  ipcMain.handle(IPC.workspaceTerminalBounds, async (event, request: WorkspaceTerminalBoundsRequest) => {
+    assertMainRenderer(event, getMainWindow);
+    if (!request || typeof request !== "object" || typeof request.id !== "string") {
+      throw new Error("Workspace terminal bounds request is invalid.");
+    }
+    const updated = await workspace.updateTerminalBounds(request.id, request.bounds);
+    const live = terminals.findByWorkspaceObject(request.id, workspace.get().id);
+    if (live) terminals.setBounds(live.id, request.bounds);
+    return updated;
+  });
+  ipcMain.handle(IPC.workspaceRemoveTerminal, async (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Workspace terminal identifier is invalid.");
+    const updated = await workspace.removeTerminal(id);
+    const live = terminals.findByWorkspaceObject(id, workspace.get().id);
+    if (live) terminals.dispose(live.id);
+    return updated;
+  });
+  ipcMain.handle(IPC.workspacePluginCanvas, (event, instances: PluginCanvasInstance[]) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.setPluginCanvas(instances);
+  });
+  ipcMain.handle(IPC.workspaceBrowserCanvas, (event, bounds: BrowserCanvasState | null) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.setBrowserCanvas(bounds);
+  });
+  ipcMain.handle(IPC.workspaceGroupCreate, (event, input: WorkspaceGroupInput) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.createGroup(input);
+  });
+  ipcMain.handle(IPC.workspaceGroupUpdate, (event, input: WorkspaceGroupUpdate) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.updateGroup(input);
+  });
+  ipcMain.handle(IPC.workspaceGroupMove, async (event, id: unknown, position: Point) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Workspace group identifier is invalid.");
+    const updated = await workspace.moveGroup(id, position);
+    syncLiveWorkspaceBounds(updated, terminals);
+    return updated;
+  });
+  ipcMain.handle(IPC.workspaceGroupRemove, (event, id: unknown, removeMembers?: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string" || (removeMembers !== undefined && typeof removeMembers !== "boolean")) throw new Error("Workspace group removal is invalid.");
+    return workspace.removeGroup(id, removeMembers === true);
+  });
+  ipcMain.handle(IPC.workspaceAutoArrange, async (event, mode: WorkspaceArrangeMode, objectIds?: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (objectIds !== undefined && (!Array.isArray(objectIds) || objectIds.some((id) => typeof id !== "string"))) throw new Error("Workspace arrange selection is invalid.");
+    const updated = await workspace.autoArrange(mode, objectIds as string[] | undefined);
+    syncLiveWorkspaceBounds(updated, terminals);
+    return updated;
+  });
+  ipcMain.handle(IPC.workspaceViewSave, (event, input: WorkspaceSavedViewInput) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.saveView(input);
+  });
+  ipcMain.handle(IPC.workspaceViewRemove, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Saved view identifier is invalid.");
+    return workspace.removeView(id);
+  });
+  ipcMain.handle(IPC.workspaceTemplateCreate, (event, input: TerminalTemplateInput) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.createTemplate(input);
+  });
+  ipcMain.handle(IPC.workspaceTemplateUpdate, (event, input: TerminalTemplateUpdate) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.updateTemplate(input);
+  });
+  ipcMain.handle(IPC.workspaceTemplateRemove, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal template identifier is invalid.");
+    return workspace.removeTemplate(id);
+  });
+  ipcMain.handle(IPC.workspaceTemplateRun, async (event, id: unknown, position: Point) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal template identifier is invalid.");
+    const active = workspace.get();
+    const template = active.templates.find((candidate) => candidate.id === id);
+    if (!template) throw new Error("Terminal template does not exist.");
+    const terminal = await workspace.createTerminal({ provider: template.provider, profile: template.profile, cwd: template.cwd, position, title: template.title }, active.id);
+    const session = terminals.create({ provider: template.provider, profile: template.profile, cwd: template.cwd, position, title: template.title }, {
+      workspaceId: active.id,
+      workspaceObjectId: terminal.id,
+      size: template.size,
+      titleCustomized: true
+    });
+    if (template.command && session.exitCode === null) terminals.input(session.id, `${template.command}\r`);
+    return session;
+  });
+  ipcMain.handle(IPC.workspacePresetSave, (event, input: WorkspacePresetInput) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.savePreset(input);
+  });
+  ipcMain.handle(IPC.workspacePresetRemove, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Workspace preset identifier is invalid.");
+    return workspace.removePreset(id);
+  });
+  ipcMain.handle(IPC.workspaceExport, (event) => { assertMainRenderer(event, getMainWindow); return workspace.exportWorkspace(); });
+  ipcMain.handle(IPC.workspaceImport, (event, raw: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof raw !== "string") throw new Error("Workspace import is invalid.");
+    return workspace.importWorkspace(raw);
+  });
+
+  ipcMain.handle(IPC.actionsList, (event) => { assertMainRenderer(event, getMainWindow); return workspace.listActions(); });
+  ipcMain.handle(IPC.actionsRuns, (event) => { assertMainRenderer(event, getMainWindow); return actionRuns.list(); });
+  ipcMain.handle(IPC.actionsCreate, (event, input: ProjectActionInput) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.createAction(input);
+  });
+  ipcMain.handle(IPC.actionsUpdate, (event, input: ProjectActionUpdate) => {
+    assertMainRenderer(event, getMainWindow);
+    return workspace.updateAction(input);
+  });
+  ipcMain.handle(IPC.actionsRemove, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Project action identifier is invalid.");
+    return workspace.removeAction(id);
+  });
+  ipcMain.handle(IPC.actionsRun, (event, request: RunProjectActionRequest) => {
+    assertMainRenderer(event, getMainWindow);
+    if (!request || typeof request !== "object" || typeof request.id !== "string") {
+      throw new Error("Project action run request is invalid.");
+    }
+    return actionRuns.run({ ...request, requester: "user", requesterId: undefined });
+  });
+  ipcMain.handle(IPC.actionsApprove, (event, token: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof token !== "string") throw new Error("Action approval token is invalid.");
+    return actionRuns.approve(token);
+  });
+  ipcMain.handle(IPC.actionsStop, (event, runId: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof runId !== "string") throw new Error("Action run identifier is invalid.");
+    return actionRuns.stop(runId);
+  });
+  ipcMain.handle(IPC.actionsRetry, (event, runId: unknown, stepId?: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof runId !== "string" || (stepId !== undefined && typeof stepId !== "string")) throw new Error("Action retry request is invalid.");
+    return actionRuns.retry(runId, stepId);
+  });
+  ipcMain.handle(IPC.actionsDiscover, (event, root: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof root !== "string") throw new Error("Project root is invalid.");
+    return actionSources.discover(root);
+  });
+  ipcMain.handle(IPC.actionsImport, (event, inputs: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (!Array.isArray(inputs)) throw new Error("Project action import is invalid.");
+    return workspace.importActions(inputs as ProjectActionInput[]);
   });
   ipcMain.on(IPC.canvasNavigationShortcutCapture, (event, active: boolean) => {
     assertMainRenderer(event, getMainWindow);
@@ -305,6 +551,27 @@ export function registerIpc({
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.close();
   });
+  ipcMain.handle(IPC.pluginsActionsList, (_event, pluginId: string) => {
+    plugins.assertPermission(pluginId, "actions:read");
+    return workspace.listActions().filter((action) => action.agentPolicy !== "deny");
+  });
+  ipcMain.handle(IPC.pluginsActionsRun, async (
+    _event,
+    pluginId: string,
+    actionId: string,
+    idempotencyKey?: string
+  ) => {
+    plugins.assertPermission(pluginId, "actions:run-approved");
+    const origin = workspace.get().terminals.length;
+    const result = await actionRuns.run({
+      id: stringValue(actionId, "actionId"),
+      position: { x: 900 + (origin % 3) * 740, y: Math.floor(origin / 3) * 470 },
+      requester: "plugin",
+      requesterId: pluginId,
+      ...(idempotencyKey ? { idempotencyKey: stringValue(idempotencyKey, "idempotencyKey") } : {})
+    });
+    return { ...result, approvalToken: undefined };
+  });
   ipcMain.handle(IPC.pluginsHostInvoke, async (
     event,
     pluginId: string,
@@ -385,6 +652,22 @@ export function registerIpc({
       const provider = providerValue(values.provider);
       requestPluginLauncher(provider);
       return null;
+    }
+    if (method === "actions.list") {
+      plugins.assertPermission(pluginId, "actions:read");
+      return workspace.listActions().filter((action) => action.agentPolicy !== "deny");
+    }
+    if (method === "actions.run") {
+      plugins.assertPermission(pluginId, "actions:run-approved");
+      const origin = workspace.get().terminals.length;
+      const result = await actionRuns.run({
+        id: stringValue(values.id, "id"),
+        position: { x: 900 + (origin % 3) * 740, y: Math.floor(origin / 3) * 470 },
+        requester: "plugin",
+        requesterId: pluginId,
+        ...(typeof values.idempotencyKey === "string" && values.idempotencyKey ? { idempotencyKey: stringValue(values.idempotencyKey, "idempotencyKey") } : {})
+      });
+      return { ...result, approvalToken: undefined };
     }
     if (method === "external.open") {
       plugins.assertPermission(pluginId, "external:open");
@@ -548,16 +831,55 @@ export function registerIpc({
     return shell.openExternal(safeGithubUrl(value));
   });
 
-  ipcMain.handle(IPC.terminalList, () => terminals.list());
-  ipcMain.handle(IPC.terminalCreate, (_event, request: CreateSessionRequest) => terminals.create(request));
-  ipcMain.handle(IPC.terminalRestart, (_event, id: string) => terminals.restart(id));
+  ipcMain.handle(IPC.terminalList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminals.list();
+  });
+  ipcMain.handle(IPC.terminalCreate, async (event, request: CreateSessionRequest) => {
+    assertMainRenderer(event, getMainWindow);
+    const workspaceId = workspace.get().id;
+    const terminal = await workspace.createTerminal(request, workspaceId);
+    try {
+      return terminals.create({ ...request, title: terminal.title }, {
+        workspaceId,
+        workspaceObjectId: terminal.id,
+        size: terminal.size,
+        titleCustomized: terminal.titleCustomized
+      });
+    } catch (error) {
+      await workspace.removeTerminal(terminal.id, workspaceId).catch(() => undefined);
+      throw error;
+    }
+  });
+  ipcMain.handle(IPC.terminalRestart, (_event, id: string) => {
+    const metadata = terminals.metadata(id);
+    if (metadata?.actionId) {
+      const action = workspace.action(metadata.actionId, metadata.workspaceId);
+      if (action) return terminals.restartAction(id, action);
+    }
+    return terminals.restart(id);
+  });
   ipcMain.on(IPC.terminalInput, (_event, id: string, data: string) => terminals.input(id, data));
   ipcMain.on(IPC.terminalResize, (_event, id: string, cols: number, rows: number) => {
     terminals.resize(id, cols, rows);
   });
-  ipcMain.on(IPC.terminalBounds, (_event, id: string, bounds: SessionBounds) => terminals.setBounds(id, bounds));
-  ipcMain.handle(IPC.terminalRename, (_event, id: string, title: string) => terminals.rename(id, title));
-  ipcMain.handle(IPC.terminalDispose, (_event, id: string) => terminals.dispose(id));
+  ipcMain.on(IPC.terminalBounds, (_event, id: string, bounds: SessionBounds) => {
+    terminals.setBounds(id, bounds);
+    const metadata = terminals.metadata(id);
+    if (metadata) void workspace.updateTerminalFromSession(metadata).catch((error) => {
+      console.warn("CanvasTTY terminal bounds could not be persisted.", error);
+    });
+  });
+  ipcMain.handle(IPC.terminalRename, async (_event, id: string, title: string) => {
+    const metadata = terminals.rename(id, title);
+    await workspace.updateTerminalFromSession(metadata);
+    return metadata;
+  });
+  ipcMain.handle(IPC.terminalDispose, async (_event, id: string) => {
+    const metadata = terminals.metadata(id);
+    if (metadata?.workspaceObjectId) await workspace.removeTerminal(metadata.workspaceObjectId, metadata.workspaceId);
+    terminals.dispose(id);
+  });
 
   const publishWindowState = (window: BrowserWindow): void => {
     if (!window.isDestroyed()) window.webContents.send(IPC.windowState, readWindowState(window));
@@ -650,6 +972,13 @@ function stringValue(value: unknown, label: string): string {
     throw new Error(`Plugin ${label} parameter is invalid.`);
   }
   return value;
+}
+
+function syncLiveWorkspaceBounds(snapshot: ReturnType<WorkspaceStore["get"]>, terminals: TerminalManager): void {
+  for (const terminal of snapshot.terminals) {
+    const live = terminals.findByWorkspaceObject(terminal.id, snapshot.id);
+    if (live) terminals.setBounds(live.id, { position: terminal.position, size: terminal.size });
+  }
 }
 
 function playlistContent(value: unknown): string {

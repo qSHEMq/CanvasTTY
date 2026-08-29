@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import type {
   AgentProviderId,
   AppSettings,
@@ -10,10 +10,15 @@ import type {
   InstalledPlugin,
   LimitsSnapshot,
   SessionBounds,
-  SessionSnapshot
+  SessionSnapshot,
+  Point,
+  WorkspaceGroup,
+  WorkspaceGroupUpdate,
+  WorkspaceTerminal
 } from "../../../../shared/contracts";
 import { HomeZone } from "../home/HomeZone";
 import { TerminalCard } from "../terminal/TerminalCard";
+import { TerminalPlaceholder } from "../terminal/TerminalPlaceholder";
 import { PluginCanvasCard } from "../plugins/PluginCanvasCard";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
@@ -30,11 +35,14 @@ import {
 import { useCanvasPointerNavigation } from "./useCanvasPointerNavigation";
 import { useCanvasWheelNavigation } from "./useCanvasWheelNavigation";
 import { useCanvasWidgetFocus } from "./useCanvasWidgetFocus";
+import { GroupFrame } from "./GroupFrame";
 
 interface WorkspaceCanvasProps {
   settings: AppSettings;
   mediaData: string | null;
   sessions: SessionSnapshot[];
+  workspaceTerminals: WorkspaceTerminal[];
+  groups: WorkspaceGroup[];
   limits: LimitsSnapshot | null;
   limitsLoadState: LimitsLoadState;
   plugins: InstalledPlugin[];
@@ -45,6 +53,8 @@ interface WorkspaceCanvasProps {
   onCameraChange(camera: CameraState): void;
   onGoHome(): void;
   onOpenSettings(): void;
+  onOpenActions(): void;
+  onOpenWorkspace(): void;
   onOpenAgent(provider: AgentProviderId): void;
   onOpenTerminal(): void;
   onOpenBrowser(): void;
@@ -70,6 +80,11 @@ interface WorkspaceCanvasProps {
   onSessionBoundsChange(id: string, bounds: SessionBounds): void;
   onRestartSession(id: string): Promise<void>;
   onDisposeSession(id: string): void;
+  onStartWorkspaceTerminal(id: string): Promise<void>;
+  onWorkspaceTerminalBoundsChange(id: string, bounds: SessionBounds): Promise<void>;
+  onRemoveWorkspaceTerminal(id: string): Promise<void>;
+  onMoveGroup(id: string, position: Point): Promise<void>;
+  onUpdateGroup(input: WorkspaceGroupUpdate): Promise<void>;
   onBrowserBoundsChange(bounds: BrowserCanvasState): void;
   onFocusBrowser(): void;
   onCloseBrowser(): void;
@@ -79,6 +94,8 @@ export function WorkspaceCanvas({
   settings,
   mediaData,
   sessions,
+  workspaceTerminals,
+  groups,
   limits,
   limitsLoadState,
   plugins,
@@ -89,6 +106,8 @@ export function WorkspaceCanvas({
   onCameraChange,
   onGoHome,
   onOpenSettings,
+  onOpenActions,
+  onOpenWorkspace,
   onOpenAgent,
   onOpenTerminal,
   onOpenBrowser,
@@ -114,6 +133,11 @@ export function WorkspaceCanvas({
   onSessionBoundsChange,
   onRestartSession,
   onDisposeSession,
+  onStartWorkspaceTerminal,
+  onWorkspaceTerminalBoundsChange,
+  onRemoveWorkspaceTerminal,
+  onMoveGroup,
+  onUpdateGroup,
   onBrowserBoundsChange,
   onFocusBrowser,
   onCloseBrowser
@@ -167,6 +191,15 @@ export function WorkspaceCanvas({
     size: homeGridPixelSize(settings.homeGridSize)
   };
   const homeLayoutValid = homeLayoutFitsGrid(settings.homeLayout, settings.homeGridSize);
+  const placeholderTerminals = useMemo(() => {
+    const liveObjectIds = new Set(sessions.flatMap((session) => (
+      session.workspaceObjectId ? [session.workspaceObjectId] : []
+    )));
+    return workspaceTerminals.filter((terminal) => !liveObjectIds.has(terminal.id));
+  }, [sessions, workspaceTerminals]);
+  const collapsedMemberIds = useMemo(() => new Set(groups.filter((group) => group.collapsed).flatMap((group) => group.memberIds)), [groups]);
+  const visibleSessions = useMemo(() => sessions.filter((session) => !session.workspaceObjectId || !collapsedMemberIds.has(session.workspaceObjectId)), [collapsedMemberIds, sessions]);
+  const visiblePlaceholders = useMemo(() => placeholderTerminals.filter((terminal) => !collapsedMemberIds.has(terminal.id)), [collapsedMemberIds, placeholderTerminals]);
 
   return (
     <div
@@ -233,7 +266,8 @@ export function WorkspaceCanvas({
           className={`workspace__windows ${homeEditing ? "workspace__windows--hidden" : ""}`}
           aria-hidden={homeEditing}
         >
-          {sessions.map((session) => (
+          {groups.map((group) => <GroupFrame key={group.id} group={group} locale={settings.locale} zoom={camera.zoom} onMove={onMoveGroup} onUpdate={onUpdateGroup} />)}
+          {visibleSessions.map((session) => (
             <TerminalCard
               key={session.id}
               session={session}
@@ -250,9 +284,10 @@ export function WorkspaceCanvas({
               renaming={renamingSessionId === session.id}
               snapTargets={[
                 homeBounds,
-                ...sessions
+                ...visibleSessions
                   .filter((candidate) => candidate.id !== session.id)
                   .map((candidate) => ({ position: candidate.position, size: candidate.size })),
+                ...visiblePlaceholders.map((candidate) => ({ position: candidate.position, size: candidate.size })),
                 ...settings.pluginCanvas.map((candidate) => ({ position: candidate.position, size: candidate.size })),
                 ...(settings.browserCanvas ? [settings.browserCanvas] : [])
               ]}
@@ -268,7 +303,29 @@ export function WorkspaceCanvas({
               onDispose={onDisposeSession}
             />
           ))}
+          {visiblePlaceholders.map((terminal) => (
+            <TerminalPlaceholder
+              key={terminal.id}
+              terminal={terminal}
+              locale={settings.locale}
+              zoom={camera.zoom}
+              snapEnabled={settings.snapToGrid}
+              snapTargets={[
+                homeBounds,
+                ...visibleSessions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
+                ...visiblePlaceholders
+                  .filter((candidate) => candidate.id !== terminal.id)
+                  .map((candidate) => ({ position: candidate.position, size: candidate.size })),
+                ...settings.pluginCanvas.map((candidate) => ({ position: candidate.position, size: candidate.size })),
+                ...(settings.browserCanvas ? [settings.browserCanvas] : [])
+              ]}
+              onStart={onStartWorkspaceTerminal}
+              onBoundsChange={onWorkspaceTerminalBoundsChange}
+              onRemove={onRemoveWorkspaceTerminal}
+            />
+          ))}
           {settings.pluginCanvas.map((instance) => {
+            if (collapsedMemberIds.has(instance.id)) return null;
             const plugin = plugins.find((candidate) => candidate.manifest.id === instance.pluginId && candidate.enabled);
             const contribution = plugin?.manifest.contributions.find((candidate) => candidate.id === instance.contributionId);
             if (!plugin || !contribution || contribution.kind !== "canvas-app") return null;
@@ -286,7 +343,8 @@ export function WorkspaceCanvas({
                 limits={limits}
                 snapTargets={[
                   homeBounds,
-                  ...sessions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
+                  ...visibleSessions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
+                  ...visiblePlaceholders.map((candidate) => ({ position: candidate.position, size: candidate.size })),
                   ...settings.pluginCanvas
                     .filter((candidate) => candidate.id !== instance.id)
                     .map((candidate) => ({ position: candidate.position, size: candidate.size })),
@@ -313,7 +371,7 @@ export function WorkspaceCanvas({
               />
             );
           })}
-          {settings.browserCanvas && (
+          {settings.browserCanvas && !collapsedMemberIds.has("browser") && (
             <BrowserCard
               browser={browser}
               bounds={settings.browserCanvas}
@@ -328,7 +386,8 @@ export function WorkspaceCanvas({
               showAgentPresence={settings.browserShowAgentPresence}
               snapTargets={[
                 homeBounds,
-                ...sessions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
+                ...visibleSessions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
+                ...visiblePlaceholders.map((candidate) => ({ position: candidate.position, size: candidate.size })),
                 ...settings.pluginCanvas.map((candidate) => ({ position: candidate.position, size: candidate.size }))
               ]}
               onBoundsChange={onBrowserBoundsChange}
@@ -362,6 +421,8 @@ export function WorkspaceCanvas({
 
       <div className="canvas-controls" data-interactive="true">
         <button type="button" onClick={onGoHome} title={t(settings.locale, "home")}><UiIcon name="home" size={17} /></button>
+        <button type="button" onClick={onOpenActions} title={t(settings.locale, "projectActions")}><UiIcon name="bolt" size={17} /></button>
+        <button type="button" onClick={onOpenWorkspace} title={settings.locale === "ru" ? "Настроить workspace" : "Manage workspace"}><UiIcon name="settings" size={17} /></button>
         <button type="button" onClick={() => wheelNavigation.zoomBy(0.82)} title={t(settings.locale, "zoomOut")}><UiIcon name="zoom-out" size={17} /></button>
         <button type="button" onClick={() => wheelNavigation.zoomBy(1.22)} title={t(settings.locale, "zoomIn")}><UiIcon name="zoom-in" size={17} /></button>
       </div>

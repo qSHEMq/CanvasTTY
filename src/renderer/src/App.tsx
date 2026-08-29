@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentProviderId,
+  ActionApprovalRequest,
+  ActionDiscoveryResult,
+  ActionRunSnapshot,
   AppSettings,
   BrowserCanvasState,
   BrowserSnapshot,
@@ -18,25 +21,40 @@ import type {
   PluginInstallPreview,
   PluginManifest,
   PluginUpdateStatus,
+  ProjectActionDefinition,
+  ProjectActionInput,
   ProviderId,
   SessionBounds,
   SessionSnapshot,
+  WorkspaceDocument,
+  WorkspaceCatalogSnapshot,
+  WorkspaceArrangeMode,
+  WorkspaceGroupInput,
+  WorkspaceGroupUpdate,
+  WorkspacePresetInput,
+  WorkspaceSavedViewInput,
+  TerminalTemplateInput,
   WindowState
 } from "../../shared/contracts";
 import {
+  DEFAULT_WORKSPACE_ID,
   DEFAULT_HOME_ACCENT_COLORS,
   DEFAULT_HOME_GRID_SIZE,
   DEFAULT_HOME_LAYOUT,
-  DEFAULT_SHORTCUTS
+  DEFAULT_SHORTCUTS,
+  WORKSPACE_SCHEMA_VERSION
 } from "../../shared/contracts";
 import { TitleBar } from "./components/TitleBar";
 import { Toast } from "./components/Toast";
 import { AgentLaunchDialog } from "./features/launcher/AgentLaunchDialog";
+import { ActionsPanel } from "./features/actions/ActionsPanel";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { resolveAppearanceSettings } from "./features/settings/appearanceSettings";
 import { persistSettingsUpdate } from "./features/settings/persistSettings";
 import { PluginBrowserOpenQueue } from "./features/plugins/PluginBrowserOpenQueue";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
+import { WorkspacePanel } from "./features/workspaces/WorkspacePanel";
+import { CommandPalette, type PaletteCommand } from "./features/workspaces/CommandPalette";
 import type { LimitsLoadState } from "./features/home/homeModel";
 import { t } from "./lib/i18n";
 import {
@@ -98,6 +116,31 @@ const EMPTY_BROWSER_SNAPSHOT: BrowserSnapshot = {
   pendingDialog: null
 };
 
+const FALLBACK_WORKSPACE: WorkspaceDocument = {
+  schemaVersion: WORKSPACE_SCHEMA_VERSION,
+  id: DEFAULT_WORKSPACE_ID,
+  revision: 0,
+  title: "Workspace",
+  projectRoot: "",
+  camera: { x: 0, y: 0, zoom: 1 },
+  terminals: [],
+  groups: [],
+  savedViews: [],
+  templates: [],
+  actions: [],
+  actionRuns: [],
+  pluginCanvas: [],
+  browserCanvas: null,
+  updatedAt: 0
+};
+
+const FALLBACK_CATALOG: WorkspaceCatalogSnapshot = {
+  revision: 0,
+  activeId: DEFAULT_WORKSPACE_ID,
+  workspaces: [{ id: DEFAULT_WORKSPACE_ID, title: "Workspace", projectRoot: "", objectCount: 0, updatedAt: 0 }],
+  presets: []
+};
+
 const DEFAULT_FOCUS_ZOOM = 0.92;
 const PLUGIN_CANVAS_FOCUS_ZOOM = 1;
 
@@ -148,6 +191,10 @@ function contrastRatio(left: number, right: number): number {
 
 export function App(): React.JSX.Element {
   const [settings, setSettings] = useState(FALLBACK_SETTINGS);
+  const [workspace, setWorkspace] = useState(FALLBACK_WORKSPACE);
+  const [workspaceCatalog, setWorkspaceCatalog] = useState(FALLBACK_CATALOG);
+  const [actionRuns, setActionRuns] = useState<ActionRunSnapshot[]>([]);
+  const [actionApprovals, setActionApprovals] = useState<ActionApprovalRequest[]>([]);
   const [sessions, setSessions] = useState<SessionSnapshot[]>([]);
   const [limits, setLimits] = useState<LimitsSnapshot | null>(null);
   const [limitsLoadState, setLimitsLoadState] = useState<LimitsLoadState>("loading");
@@ -160,6 +207,9 @@ export function App(): React.JSX.Element {
   const pluginBrowserOpenQueueRef = useRef(new PluginBrowserOpenQueue());
   const [launchProvider, setLaunchProvider] = useState<AgentProviderId | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [workspacePanelOpen, setWorkspacePanelOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [browserSelected, setBrowserSelected] = useState(false);
@@ -175,8 +225,8 @@ export function App(): React.JSX.Element {
   const showToast = useCallback((message: string): void => setToast(message), []);
 
   useEffect(() => {
-    browserCanvasRef.current = settings.browserCanvas;
-  }, [settings.browserCanvas]);
+    browserCanvasRef.current = workspace.browserCanvas;
+  }, [workspace.browserCanvas]);
 
   useEffect(() => {
     if (!toast) return;
@@ -193,6 +243,10 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     let active = true;
     const browserApi = window.canvasTTY.browser;
+    const acceptWorkspace = (candidate: WorkspaceDocument): void => {
+      if (!active) return;
+      setWorkspace((current) => candidate.id !== current.id || candidate.revision >= current.revision ? candidate : current);
+    };
     const unsubscribeSession = window.canvasTTY.terminal.onSession(({ session }) => {
       if (active) setSessions((current) => upsertSession(current, session));
     });
@@ -202,24 +256,48 @@ export function App(): React.JSX.Element {
       setActiveSessionId((current) => current === id ? null : current);
       setRenamingSessionId((current) => current === id ? null : current);
     });
+    const unsubscribeWorkspace = window.canvasTTY.workspace.onChanged(({ workspace: updated }) => {
+      acceptWorkspace(updated);
+    });
+    const unsubscribeCatalog = window.canvasTTY.workspace.onCatalogChanged(({ catalog }) => {
+      if (active) setWorkspaceCatalog(catalog);
+    });
+    const unsubscribeRun = window.canvasTTY.actions.onRun(({ run }) => {
+      if (!active) return;
+      setActionRuns((current) => current.some((candidate) => candidate.id === run.id)
+        ? current.map((candidate) => candidate.id === run.id ? run : candidate)
+        : [...current, run]);
+    });
+    const unsubscribeApproval = window.canvasTTY.actions.onApproval(({ approval }) => {
+      if (!active) return;
+      setActionApprovals((current) => [...current.filter((candidate) => candidate.token !== approval.token), approval]);
+      showToast(settings.locale === "ru" ? "Агент запрашивает подтверждение Project Action" : "An agent requests Project Action approval");
+    });
 
     const settingsRequest = window.canvasTTY.settings.get();
+    const workspaceRequest = window.canvasTTY.workspace.get();
+    const catalogRequest = window.canvasTTY.workspace.catalog();
+    const runsRequest = window.canvasTTY.actions.runs();
     const sessionsRequest = window.canvasTTY.terminal.list().then((loadedSessions) => {
       if (active) setSessions((current) => mergeSessionSnapshots(current, loadedSessions));
       return loadedSessions;
     });
     const pluginsRequest = window.canvasTTY.plugins.list();
 
-    void Promise.all([settingsRequest, sessionsRequest, pluginsRequest])
-      .then(async ([loadedSettings, _loadedSessions, loadedPlugins]) => {
+    void Promise.all([settingsRequest, workspaceRequest, catalogRequest, runsRequest, sessionsRequest, pluginsRequest])
+      .then(async ([loadedSettings, loadedWorkspace, loadedCatalog, loadedRuns, _loadedSessions, loadedPlugins]) => {
         if (!active) return;
         setSettings(loadedSettings);
+        acceptWorkspace(loadedWorkspace);
+        setWorkspaceCatalog(loadedCatalog);
+        setActionRuns(loadedRuns);
         setPlugins(loadedPlugins);
-        if (loadedSettings.browserCanvas && browserApi) {
+        if (loadedWorkspace.browserCanvas && browserApi) {
           const browserState = await browserApi.open();
           if (active) setBrowser(browserState);
         }
-        if (isHomeCamera.current) setCamera(homeCamera(loadedSettings.homeGridSize));
+        setCamera(loadedWorkspace.camera);
+        isHomeCamera.current = false;
         if (loadedSettings.mediaPath) {
           const data = await window.canvasTTY.media.read(loadedSettings.mediaPath);
           if (active) setMediaData(data);
@@ -232,6 +310,10 @@ export function App(): React.JSX.Element {
       active = false;
       unsubscribeSession();
       unsubscribeRemoved();
+      unsubscribeWorkspace();
+      unsubscribeCatalog();
+      unsubscribeRun();
+      unsubscribeApproval();
     };
   }, [showToast]);
 
@@ -282,6 +364,14 @@ export function App(): React.JSX.Element {
     window.addEventListener("resize", recenterHome);
     return () => window.removeEventListener("resize", recenterHome);
   }, [settings.homeGridSize]);
+
+  useEffect(() => {
+    if (!ready || homeEditDraft) return;
+    const timer = window.setTimeout(() => {
+      void window.canvasTTY.workspace.setCamera(camera).catch(() => undefined);
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [camera, homeEditDraft, ready, workspace.id]);
 
   const persistSettings = useCallback(async (patch: Partial<AppSettings>): Promise<void> => {
     await persistSettingsUpdate(
@@ -347,6 +437,208 @@ export function App(): React.JSX.Element {
     }
   }, [settings.locale, showToast]);
 
+  const startWorkspaceTerminal = useCallback(async (id: string): Promise<void> => {
+    try {
+      const session = await window.canvasTTY.workspace.startTerminal(id);
+      setSessions((current) => upsertSnapshot(current, session));
+      setBrowserSelected(false);
+      setActiveSessionId(session.id);
+      isHomeCamera.current = false;
+      setCamera(focusCamera(session.position, session.size));
+      showToast(t(settings.locale, "terminalStarted"));
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t(settings.locale, "launchFailed"));
+      throw error;
+    }
+  }, [settings.locale, showToast]);
+
+  const changeWorkspaceTerminalBounds = useCallback(async (
+    id: string,
+    bounds: SessionBounds
+  ): Promise<void> => {
+    try {
+      const updated = await window.canvasTTY.workspace.setTerminalBounds({ id, bounds });
+      setWorkspace((current) => updated.revision >= current.revision ? updated : current);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t(settings.locale, "settingsFailed"));
+      throw error;
+    }
+  }, [settings.locale, showToast]);
+
+  const removeWorkspaceTerminal = useCallback(async (id: string): Promise<void> => {
+    try {
+      const updated = await window.canvasTTY.workspace.removeTerminal(id);
+      setWorkspace((current) => updated.revision >= current.revision ? updated : current);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t(settings.locale, "settingsFailed"));
+      throw error;
+    }
+  }, [settings.locale, showToast]);
+
+  const renameWorkspace = useCallback(async (title: string): Promise<void> => {
+    const updated = await window.canvasTTY.workspace.rename(title);
+    setWorkspace((current) => updated.revision >= current.revision ? updated : current);
+  }, []);
+
+  const acceptWorkspaceSwitch = useCallback((result: { catalog: WorkspaceCatalogSnapshot; workspace: WorkspaceDocument }): void => {
+    setWorkspaceCatalog(result.catalog);
+    setWorkspace(result.workspace);
+    setActionRuns(result.workspace.actionRuns);
+    setCamera(result.workspace.camera);
+    browserCanvasRef.current = result.workspace.browserCanvas;
+    isHomeCamera.current = false;
+    setActiveSessionId(null);
+    setBrowserSelected(false);
+    setRenamingSessionId(null);
+  }, []);
+
+  const switchWorkspace = useCallback(async (id: string): Promise<void> => {
+    await window.canvasTTY.workspace.setCamera(camera);
+    acceptWorkspaceSwitch(await window.canvasTTY.workspace.switch(id));
+  }, [acceptWorkspaceSwitch, camera]);
+
+  const createWorkspace = useCallback(async (title: string, projectRoot: string, presetId?: string): Promise<void> => {
+    acceptWorkspaceSwitch(await window.canvasTTY.workspace.create({ title, projectRoot, presetId }));
+  }, [acceptWorkspaceSwitch]);
+
+  const duplicateWorkspace = useCallback(async (id: string): Promise<void> => {
+    acceptWorkspaceSwitch(await window.canvasTTY.workspace.duplicate(id));
+  }, [acceptWorkspaceSwitch]);
+
+  const deleteWorkspace = useCallback(async (id: string): Promise<void> => {
+    acceptWorkspaceSwitch(await window.canvasTTY.workspace.delete(id));
+  }, [acceptWorkspaceSwitch]);
+
+  const setProjectRoot = useCallback(async (projectRoot: string): Promise<void> => {
+    setWorkspace(await window.canvasTTY.workspace.setProjectRoot(projectRoot));
+  }, []);
+
+  const createWorkspaceGroup = useCallback(async (input: WorkspaceGroupInput): Promise<void> => {
+    setWorkspace(await window.canvasTTY.workspace.createGroup(input));
+  }, []);
+
+  const updateWorkspaceGroup = useCallback(async (input: WorkspaceGroupUpdate): Promise<void> => {
+    setWorkspace(await window.canvasTTY.workspace.updateGroup(input));
+  }, []);
+
+  const moveWorkspaceGroup = useCallback(async (id: string, position: Point): Promise<void> => {
+    setWorkspace(await window.canvasTTY.workspace.moveGroup(id, position));
+  }, []);
+
+  const removeWorkspaceGroup = useCallback(async (id: string, removeMembers = false): Promise<void> => {
+    setWorkspace(await window.canvasTTY.workspace.removeGroup(id, removeMembers));
+  }, []);
+
+  const autoArrangeWorkspace = useCallback(async (mode: WorkspaceArrangeMode, objectIds?: string[]): Promise<void> => {
+    const updated = await window.canvasTTY.workspace.autoArrange(mode, objectIds);
+    setWorkspace(updated);
+  }, []);
+
+  const saveWorkspaceView = useCallback(async (input: WorkspaceSavedViewInput): Promise<void> => {
+    setWorkspace(await window.canvasTTY.workspace.saveView(input));
+  }, []);
+
+  const removeWorkspaceView = useCallback(async (id: string): Promise<void> => {
+    setWorkspace(await window.canvasTTY.workspace.removeView(id));
+  }, []);
+
+  const createTerminalTemplate = useCallback(async (input: TerminalTemplateInput): Promise<void> => {
+    setWorkspace(await window.canvasTTY.workspace.createTemplate(input));
+  }, []);
+
+  const removeTerminalTemplate = useCallback(async (id: string): Promise<void> => {
+    setWorkspace(await window.canvasTTY.workspace.removeTemplate(id));
+  }, []);
+
+  const runTerminalTemplate = useCallback(async (id: string): Promise<void> => {
+    const session = await window.canvasTTY.workspace.runTemplate(id, nextSessionPosition(sessions.length, settings.homeGridSize));
+    setSessions((current) => upsertSnapshot(current, session));
+    setActiveSessionId(session.id);
+    setWorkspacePanelOpen(false);
+    setCamera(focusCamera(session.position, session.size));
+  }, [sessions.length, settings.homeGridSize]);
+
+  const saveWorkspacePreset = useCallback(async (input: WorkspacePresetInput): Promise<void> => {
+    setWorkspaceCatalog(await window.canvasTTY.workspace.savePreset(input));
+  }, []);
+
+  const removeWorkspacePreset = useCallback(async (id: string): Promise<void> => {
+    setWorkspaceCatalog(await window.canvasTTY.workspace.removePreset(id));
+  }, []);
+
+  const exportWorkspace = useCallback((): Promise<string> => window.canvasTTY.workspace.export(), []);
+  const importWorkspace = useCallback(async (raw: string): Promise<void> => {
+    acceptWorkspaceSwitch(await window.canvasTTY.workspace.import(raw));
+  }, [acceptWorkspaceSwitch]);
+
+  const createProjectAction = useCallback(async (input: ProjectActionInput): Promise<void> => {
+    const updated = await window.canvasTTY.actions.create(input);
+    setWorkspace((current) => updated.revision >= current.revision ? updated : current);
+    showToast(t(settings.locale, "saveAction"));
+  }, [settings.locale, showToast]);
+
+  const updateProjectAction = useCallback(async (id: string, input: ProjectActionInput): Promise<void> => {
+    const updated = await window.canvasTTY.actions.update({ id, ...input });
+    setWorkspace((current) => updated.revision >= current.revision ? updated : current);
+    showToast(t(settings.locale, "saveAction"));
+  }, [settings.locale, showToast]);
+
+  const removeProjectAction = useCallback(async (id: string): Promise<void> => {
+    const updated = await window.canvasTTY.actions.remove(id);
+    setWorkspace((current) => updated.revision >= current.revision ? updated : current);
+  }, []);
+
+  const discoverProjectActions = useCallback(async (): Promise<ActionDiscoveryResult> => {
+    const root = workspace.projectRoot || settings.lastDirectory;
+    return window.canvasTTY.actions.discover(root);
+  }, [settings.lastDirectory, workspace.projectRoot]);
+
+  const importProjectActions = useCallback(async (inputs: ProjectActionInput[]): Promise<void> => {
+    setWorkspace(await window.canvasTTY.actions.import(inputs));
+  }, []);
+
+  const runProjectAction = useCallback(async (action: ProjectActionDefinition): Promise<void> => {
+    const position = nextSessionPosition(sessions.length, settings.homeGridSize);
+    let result = await window.canvasTTY.actions.run({ id: action.id, position, requester: "user" });
+    if (result.needsApproval && result.approvalToken) result = await window.canvasTTY.actions.approve(result.approvalToken);
+    setActionRuns((current) => current.some((run) => run.id === result.run.id)
+      ? current.map((run) => run.id === result.run.id ? result.run : run)
+      : [...current, result.run]);
+    if (result.session) setSessions((current) => upsertSnapshot(current, result.session!));
+    setSettingsOpen(false);
+    setBrowserSelected(false);
+    if (result.session) {
+      setActiveSessionId(result.session.id);
+      isHomeCamera.current = false;
+      setCamera(focusCamera(result.session.position, result.session.size));
+    }
+    showToast(t(settings.locale, result.focusedExisting ? "actionAlreadyRunning" : "actionStarted"));
+  }, [sessions.length, settings.homeGridSize, settings.locale, showToast]);
+
+  const stopProjectAction = useCallback(async (runId: string): Promise<void> => {
+    const run = await window.canvasTTY.actions.stop(runId);
+    setActionRuns((current) => current.map((candidate) => candidate.id === run.id ? run : candidate));
+    showToast(t(settings.locale, "actionStopped"));
+  }, [settings.locale, showToast]);
+
+  const retryProjectAction = useCallback(async (runId: string, stepId?: string): Promise<void> => {
+    let result = await window.canvasTTY.actions.retry(runId, stepId);
+    if (result.needsApproval && result.approvalToken) result = await window.canvasTTY.actions.approve(result.approvalToken);
+    setActionRuns((current) => current.some((run) => run.id === result.run.id)
+      ? current.map((run) => run.id === result.run.id ? result.run : run)
+      : [...current, result.run]);
+    if (result.session) setSessions((current) => upsertSnapshot(current, result.session!));
+  }, []);
+
+  const approveProjectAction = useCallback(async (token: string): Promise<void> => {
+    const result = await window.canvasTTY.actions.approve(token);
+    setActionApprovals((current) => current.filter((approval) => approval.token !== token));
+    setActionRuns((current) => current.some((run) => run.id === result.run.id)
+      ? current.map((run) => run.id === result.run.id ? result.run : run)
+      : [...current, result.run]);
+    if (result.session) setSessions((current) => upsertSnapshot(current, result.session!));
+  }, []);
+
   const acknowledgeDanger = useCallback(async (provider: AgentProviderId): Promise<void> => {
     if (settings.acknowledgedDangerousProfiles.includes(provider)) return;
     await saveSettings({
@@ -385,31 +677,31 @@ export function App(): React.JSX.Element {
   }, []);
 
   const changePluginCanvasBounds = useCallback((id: string, bounds: SessionBounds): void => {
-    const pluginCanvas = settings.pluginCanvas.map((instance) => instance.id === id
+    const pluginCanvas = workspace.pluginCanvas.map((instance) => instance.id === id
       ? { ...instance, position: bounds.position, size: bounds.size }
       : instance);
-    setSettings((current) => ({ ...current, pluginCanvas }));
-    void saveSettings({ pluginCanvas });
-  }, [saveSettings, settings.pluginCanvas]);
+    setWorkspace((current) => ({ ...current, pluginCanvas }));
+    void window.canvasTTY.workspace.setPluginCanvas(pluginCanvas).catch((error) => showToast(error instanceof Error ? error.message : "Workspace update failed"));
+  }, [showToast, workspace.pluginCanvas]);
 
   const changeBrowserBounds = useCallback((browserCanvas: BrowserCanvasState): void => {
     browserCanvasRef.current = browserCanvas;
-    setSettings((current) => ({ ...current, browserCanvas }));
-    void saveSettings({ browserCanvas });
-  }, [saveSettings]);
+    setWorkspace((current) => ({ ...current, browserCanvas }));
+    void window.canvasTTY.workspace.setBrowserCanvas(browserCanvas).catch((error) => showToast(error instanceof Error ? error.message : "Workspace update failed"));
+  }, [showToast]);
 
   const disposePluginCanvas = useCallback((id: string): void => {
-    void saveSettings({ pluginCanvas: settings.pluginCanvas.filter((instance) => instance.id !== id) });
-  }, [saveSettings, settings.pluginCanvas]);
+    void window.canvasTTY.workspace.setPluginCanvas(workspace.pluginCanvas.filter((instance) => instance.id !== id));
+  }, [workspace.pluginCanvas]);
 
   const focusPluginCanvas = useCallback((id: string): void => {
-    const instance = settings.pluginCanvas.find((candidate) => candidate.id === id);
+    const instance = workspace.pluginCanvas.find((candidate) => candidate.id === id);
     if (!instance) return;
     setActiveSessionId(null);
     setBrowserSelected(false);
     isHomeCamera.current = false;
     setCamera(focusCamera(instance.position, instance.size, PLUGIN_CANVAS_FOCUS_ZOOM));
-  }, [settings.pluginCanvas]);
+  }, [workspace.pluginCanvas]);
 
   const openBrowser = useCallback(async (url?: string): Promise<void> => {
     const browserApi = window.canvasTTY.browser;
@@ -418,8 +710,8 @@ export function App(): React.JSX.Element {
     const homeSize = homeGridPixelSize(settings.homeGridSize);
     const browserCanvas = existingBrowserCanvas ?? {
       position: {
-        x: homeSize.width + 160 + ((sessions.length + settings.pluginCanvas.length) % 2) * 760,
-        y: Math.floor((sessions.length + settings.pluginCanvas.length) / 2) * 500 + 20
+        x: homeSize.width + 160 + ((sessions.length + workspace.pluginCanvas.length) % 2) * 760,
+        y: Math.floor((sessions.length + workspace.pluginCanvas.length) / 2) * 500 + 20
       },
       size: { width: 920, height: 620 }
     };
@@ -428,7 +720,7 @@ export function App(): React.JSX.Element {
     if (!existingBrowserCanvas) {
       browserCanvasRef.current = browserCanvas;
       try {
-        await persistSettings({ browserCanvas });
+        await window.canvasTTY.workspace.setBrowserCanvas(browserCanvas);
       } catch (error) {
         browserCanvasRef.current = existingBrowserCanvas;
         throw error;
@@ -439,7 +731,7 @@ export function App(): React.JSX.Element {
     setBrowserSelected(true);
     isHomeCamera.current = false;
     setCamera(focusCamera(browserCanvas.position, browserCanvas.size));
-  }, [persistSettings, sessions.length, settings.homeGridSize, settings.locale, settings.pluginCanvas.length]);
+  }, [sessions.length, settings.homeGridSize, settings.locale, workspace.pluginCanvas.length]);
 
   useEffect(() => {
     return window.canvasTTY.plugins.onBrowserOpenRequested((request) => {
@@ -466,20 +758,20 @@ export function App(): React.JSX.Element {
       if (!browserApi) return;
       await browserApi.close();
       browserCanvasRef.current = null;
-      await saveSettings({ browserCanvas: null });
+      await window.canvasTTY.workspace.setBrowserCanvas(null);
       setBrowserSelected(false);
     } catch (error) {
       showToast(error instanceof Error ? error.message : t(settings.locale, "browserActionFailed"));
     }
-  }, [saveSettings, settings.locale, showToast]);
+  }, [settings.locale, showToast]);
 
   const focusBrowser = useCallback((): void => {
-    if (!settings.browserCanvas) return;
+    if (!workspace.browserCanvas) return;
     setActiveSessionId(null);
     setBrowserSelected(true);
     isHomeCamera.current = false;
-    setCamera(focusCamera(settings.browserCanvas.position, settings.browserCanvas.size));
-  }, [settings.browserCanvas]);
+    setCamera(focusCamera(workspace.browserCanvas.position, workspace.browserCanvas.size));
+  }, [workspace.browserCanvas]);
 
   const disposeSession = useCallback((id: string): void => {
     void window.canvasTTY.terminal.dispose(id);
@@ -598,22 +890,22 @@ export function App(): React.JSX.Element {
       homeLayout: settings.homeLayout.filter((placement) => {
         const prefix = `plugin:${pluginId}:`;
         return !placement.widgetId.startsWith(prefix) || contributions.has(placement.widgetId.slice(prefix.length));
-      }),
-      pluginCanvas: settings.pluginCanvas.filter((instance) => (
-        instance.pluginId !== pluginId || contributions.has(instance.contributionId)
-      ))
+      })
     });
-  }, [saveSettings, settings.homeLayout, settings.pluginCanvas]);
+    await window.canvasTTY.workspace.setPluginCanvas(workspace.pluginCanvas.filter((instance) => (
+      instance.pluginId !== pluginId || contributions.has(instance.contributionId)
+    )));
+  }, [saveSettings, settings.homeLayout, workspace.pluginCanvas]);
 
   const uninstallPlugin = useCallback(async (pluginId: string): Promise<void> => {
     await window.canvasTTY.plugins.uninstall(pluginId);
     setPlugins((current) => current.filter((plugin) => plugin.manifest.id !== pluginId));
     await saveSettings({
-      homeLayout: settings.homeLayout.filter((placement) => !placement.widgetId.startsWith(`plugin:${pluginId}:`)),
-      pluginCanvas: settings.pluginCanvas.filter((instance) => instance.pluginId !== pluginId)
+      homeLayout: settings.homeLayout.filter((placement) => !placement.widgetId.startsWith(`plugin:${pluginId}:`))
     });
+    await window.canvasTTY.workspace.setPluginCanvas(workspace.pluginCanvas.filter((instance) => instance.pluginId !== pluginId));
     showToast(t(settings.locale, "pluginRemoved"));
-  }, [saveSettings, settings.homeLayout, settings.locale, settings.pluginCanvas, showToast]);
+  }, [saveSettings, settings.homeLayout, settings.locale, showToast, workspace.pluginCanvas]);
 
   const searchPlugins = useCallback((query: string): Promise<GithubPluginSearchResult[]> => (
     window.canvasTTY.plugins.search(query)
@@ -646,7 +938,7 @@ export function App(): React.JSX.Element {
     contribution: Extract<PluginContribution, { kind: "canvas-app" }>,
     sourceCanvasInstanceId?: string
   ): Promise<void> => {
-    const existing = settings.pluginCanvas.find((instance) => (
+    const existing = workspace.pluginCanvas.find((instance) => (
       instance.pluginId === plugin.manifest.id && instance.contributionId === contribution.id
     ));
     if (existing) {
@@ -655,10 +947,10 @@ export function App(): React.JSX.Element {
       setCamera(focusCamera(existing.position, existing.size, PLUGIN_CANVAS_FOCUS_ZOOM));
       return;
     }
-    const index = settings.pluginCanvas.length;
+    const index = workspace.pluginCanvas.length;
     const homeSize = homeGridPixelSize(settings.homeGridSize);
     const source = sourceCanvasInstanceId
-      ? settings.pluginCanvas.find((instance) => instance.id === sourceCanvasInstanceId)
+      ? workspace.pluginCanvas.find((instance) => instance.id === sourceCanvasInstanceId)
       : null;
     const instance = {
       id: crypto.randomUUID(),
@@ -674,11 +966,11 @@ export function App(): React.JSX.Element {
       },
       size: contribution.defaultSize
     };
-    await saveSettings({ pluginCanvas: [...settings.pluginCanvas, instance] });
+    await window.canvasTTY.workspace.setPluginCanvas([...workspace.pluginCanvas, instance]);
     setSettingsOpen(false);
     isHomeCamera.current = false;
     setCamera(focusCamera(instance.position, instance.size, PLUGIN_CANVAS_FOCUS_ZOOM));
-  }, [saveSettings, settings.homeGridSize, settings.pluginCanvas]);
+  }, [settings.homeGridSize, workspace.pluginCanvas]);
 
   const openPluginContribution = useCallback(async (
     plugin: InstalledPlugin,
@@ -729,7 +1021,17 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
-      if (event.repeat || isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      const editable = Boolean(target?.closest("input, textarea, select, [contenteditable='true']"));
+      const paletteShortcut = event.key.toLowerCase() === "p" && event.shiftKey
+        && (window.canvasTTY.window.isMacOS ? event.metaKey : event.ctrlKey);
+      if (paletteShortcut && !editable && !isShortcutCaptureTarget(event.target) && !isRenameInputTarget(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        setCommandPaletteOpen(true);
+        return;
+      }
+      if (event.repeat || editable || isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
       if (matchesShortcut(event, settings.shortcuts.home)) {
         event.preventDefault();
         event.stopPropagation();
@@ -752,6 +1054,14 @@ export function App(): React.JSX.Element {
   }, [activeSessionId, goHome, settings.locale, settings.shortcuts, showToast]);
 
   const appearance = resolveAppearanceSettings(settings);
+  const workspaceSessions = useMemo(
+    () => sessions.filter((session) => session.workspaceId === workspace.id),
+    [sessions, workspace.id]
+  );
+  const workspaceLiveCounts = useMemo(() => sessions.reduce<Record<string, number>>((counts, session) => {
+    if (session.exitCode === null) counts[session.workspaceId] = (counts[session.workspaceId] ?? 0) + 1;
+    return counts;
+  }, {}), [sessions]);
   const rootClasses = useMemo(
     () => [
       "app",
@@ -769,32 +1079,85 @@ export function App(): React.JSX.Element {
       : undefined,
     [appearance.homeAccentColors, appearance.homeAccentPreset]
   );
-  const workspaceSettings = useMemo(() => homeEditDraft ? {
+  const workspaceSettings = useMemo(() => ({
     ...settings,
-    homeGridSize: homeEditDraft.homeGridSize,
-    homeLayout: homeEditDraft.homeLayout
-  } : settings, [homeEditDraft, settings]);
+    ...(homeEditDraft ? {
+      homeGridSize: homeEditDraft.homeGridSize,
+      homeLayout: homeEditDraft.homeLayout
+    } : {}),
+    pluginCanvas: workspace.pluginCanvas,
+    browserCanvas: workspace.browserCanvas
+  }), [homeEditDraft, settings, workspace.browserCanvas, workspace.pluginCanvas]);
+  const paletteCommands = useMemo<PaletteCommand[]>(() => {
+    const ru = settings.locale === "ru";
+    return [
+      { id: "actions", title: ru ? "Открыть действия проекта" : "Open Project Actions", group: ru ? "Навигация" : "Navigation", run: () => { setWorkspacePanelOpen(false); setActionsOpen(true); } },
+      { id: "workspace", title: ru ? "Настроить workspace" : "Manage workspace", group: ru ? "Навигация" : "Navigation", run: () => { setActionsOpen(false); setWorkspacePanelOpen(true); } },
+      { id: "terminal", title: ru ? "Новый терминал" : "New terminal", group: ru ? "Создать" : "Create", run: () => void openTerminal() },
+      { id: "arrange-grid", title: ru ? "Расставить карточки сеткой" : "Arrange cards in grid", group: ru ? "Раскладка" : "Layout", run: () => void autoArrangeWorkspace("grid") },
+      { id: "save-view", title: ru ? "Сохранить текущий вид" : "Save current view", group: ru ? "Раскладка" : "Layout", run: () => void saveWorkspaceView({ title: `${ru ? "Вид" : "View"} ${workspace.savedViews.length + 1}`, camera }) },
+      ...workspace.savedViews.map((view): PaletteCommand => ({ id: `view:${view.id}`, title: `${ru ? "Открыть вид" : "Open view"}: ${view.title}`, group: ru ? "Сохранённые виды" : "Saved views", run: () => setCamera(view.camera) })),
+      ...workspace.templates.map((template): PaletteCommand => ({ id: `template:${template.id}`, title: `${ru ? "Запустить шаблон" : "Run template"}: ${template.title}`, group: ru ? "Шаблоны" : "Templates", run: () => void runTerminalTemplate(template.id) })),
+      ...workspace.actions.map((action): PaletteCommand => ({ id: `action:${action.id}`, title: action.title, subtitle: action.description || action.command, group: ru ? "Действия" : "Actions", run: () => void runProjectAction(action) }))
+    ];
+  }, [autoArrangeWorkspace, camera, openTerminal, runProjectAction, runTerminalTemplate, saveWorkspaceView, settings.locale, workspace.actions, workspace.savedViews, workspace.templates]);
 
   return (
     <div className={rootClasses} style={rootStyle}>
-      <TitleBar locale={settings.locale} windowState={windowState} onWindowStateChange={setWindowState} />
+      <TitleBar
+        locale={settings.locale}
+        windowState={windowState}
+        workspaceTitle={workspace.title}
+        workspaceId={workspace.id}
+        workspaceCatalog={workspaceCatalog}
+        workspaceLiveCounts={workspaceLiveCounts}
+        onRenameWorkspace={renameWorkspace}
+        onSwitchWorkspace={switchWorkspace}
+        onCreateWorkspace={createWorkspace}
+        onDuplicateWorkspace={duplicateWorkspace}
+        onDeleteWorkspace={deleteWorkspace}
+        onOpenWorkspaceManager={() => { setActionsOpen(false); setSettingsOpen(false); setWorkspacePanelOpen(true); }}
+        onWindowStateChange={setWindowState}
+      />
       <main className="app__content">
         {!ready && <div className="loading-screen">{t(settings.locale, "loading")}</div>}
         <WorkspaceCanvas
           settings={workspaceSettings}
           mediaData={mediaData}
-          sessions={sessions}
+          sessions={workspaceSessions}
+          workspaceTerminals={workspace.terminals}
+          groups={workspace.groups}
           limits={limits}
           limitsLoadState={limitsLoadState}
           plugins={plugins}
           browser={browser}
-          browserViewVisible={!settingsOpen && launchProvider === null}
+          browserViewVisible={!settingsOpen && !actionsOpen && !workspacePanelOpen && !commandPaletteOpen && launchProvider === null}
           homeEditing={homeEditDraft !== null}
           camera={camera}
           onCameraChange={changeCamera}
           onGoHome={goHome}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onOpenAgent={setLaunchProvider}
+          onOpenSettings={() => {
+            setActionsOpen(false);
+            setWorkspacePanelOpen(false);
+            setSettingsOpen(true);
+          }}
+          onOpenActions={() => {
+            setSettingsOpen(false);
+            setWorkspacePanelOpen(false);
+            setLaunchProvider(null);
+            setActionsOpen(true);
+          }}
+          onOpenWorkspace={() => {
+            setSettingsOpen(false);
+            setActionsOpen(false);
+            setLaunchProvider(null);
+            setWorkspacePanelOpen(true);
+          }}
+          onOpenAgent={(provider) => {
+            setActionsOpen(false);
+            setWorkspacePanelOpen(false);
+            setLaunchProvider(provider);
+          }}
           onOpenTerminal={() => void openTerminal()}
           onOpenBrowser={openBrowserFromUi}
           onRequestMedia={requestMedia}
@@ -828,11 +1191,66 @@ export function App(): React.JSX.Element {
           onSessionBoundsChange={changeSessionBounds}
           onRestartSession={restartSession}
           onDisposeSession={disposeSession}
+          onStartWorkspaceTerminal={startWorkspaceTerminal}
+          onWorkspaceTerminalBoundsChange={changeWorkspaceTerminalBounds}
+          onRemoveWorkspaceTerminal={removeWorkspaceTerminal}
+          onMoveGroup={moveWorkspaceGroup}
+          onUpdateGroup={updateWorkspaceGroup}
           onBrowserBoundsChange={changeBrowserBounds}
           onFocusBrowser={focusBrowser}
           onCloseBrowser={() => void closeBrowser()}
         />
       </main>
+
+      <ActionsPanel
+        open={actionsOpen}
+        locale={settings.locale}
+        workspaceTitle={workspace.title}
+        actions={workspace.actions}
+        approvals={actionApprovals}
+        runs={actionRuns.filter((run) => run.workspaceId === workspace.id)}
+        sessions={workspaceSessions}
+        defaultCwd={workspace.projectRoot || settings.lastDirectory}
+        onClose={() => setActionsOpen(false)}
+        onCreate={createProjectAction}
+        onUpdate={updateProjectAction}
+        onRemove={removeProjectAction}
+        onRun={runProjectAction}
+        onStop={stopProjectAction}
+        onRetry={retryProjectAction}
+        onApprove={approveProjectAction}
+        onDiscover={discoverProjectActions}
+        onImport={importProjectActions}
+        onChooseFolder={(defaultPath) => window.canvasTTY.dialog.pickDirectory(defaultPath)}
+      />
+
+      <WorkspacePanel
+        open={workspacePanelOpen}
+        locale={settings.locale}
+        workspace={workspace}
+        catalog={workspaceCatalog}
+        camera={camera}
+        defaultCwd={settings.lastDirectory}
+        onClose={() => setWorkspacePanelOpen(false)}
+        onSetProjectRoot={setProjectRoot}
+        onChooseFolder={(defaultPath) => window.canvasTTY.dialog.pickDirectory(defaultPath)}
+        onCreateGroup={createWorkspaceGroup}
+        onUpdateGroup={updateWorkspaceGroup}
+        onRemoveGroup={removeWorkspaceGroup}
+        onArrange={autoArrangeWorkspace}
+        onSaveView={saveWorkspaceView}
+        onRemoveView={removeWorkspaceView}
+        onApplyView={(savedCamera) => { setCamera(savedCamera); void window.canvasTTY.workspace.setCamera(savedCamera); }}
+        onCreateTemplate={createTerminalTemplate}
+        onRemoveTemplate={removeTerminalTemplate}
+        onRunTemplate={runTerminalTemplate}
+        onSavePreset={saveWorkspacePreset}
+        onRemovePreset={removeWorkspacePreset}
+        onCreateFromPreset={createWorkspace}
+        onExport={exportWorkspace}
+        onImport={importWorkspace}
+      />
+      <CommandPalette open={commandPaletteOpen} locale={settings.locale} commands={paletteCommands} onClose={() => setCommandPaletteOpen(false)} />
 
       <AgentLaunchDialog
         provider={launchProvider}

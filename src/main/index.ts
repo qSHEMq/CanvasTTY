@@ -3,6 +3,10 @@ import { app, BrowserWindow, dialog, net, protocol, safeStorage } from "electron
 import { IPC, type PluginCanvasRequest } from "../shared/contracts";
 import { registerIpc } from "./ipc/registerIpc";
 import { SettingsStore } from "./services/SettingsStore";
+import { WorkspaceStore } from "./services/WorkspaceStore";
+import { WorkspaceIndexStore } from "./services/WorkspaceIndexStore";
+import { ActionRunManager } from "./services/ActionRunManager";
+import { ActionSourceRegistry } from "./services/ActionSourceRegistry";
 import { TerminalManager } from "./services/TerminalManager";
 import { LimitsService } from "./services/LimitsService";
 import {
@@ -86,6 +90,8 @@ let runtimeGateway: RuntimeGateway | null = null;
 let agentRuntimeBridge: AgentRuntimeBridge | null = null;
 let agentRuntimeHelper: RuntimeHookHelperLaunch | null = null;
 let providerClis: ProviderCliRegistry | null = null;
+let actionRunManager: ActionRunManager | null = null;
+let actionSourceRegistry: ActionSourceRegistry | null = null;
 const pluginWindows = new Map<BrowserWindow, string>();
 let servicesReady = false;
 let startupRunning = false;
@@ -144,6 +150,21 @@ async function initializeServices(): Promise<void> {
   const userDataPath = app.getPath("userData");
   const settings = new SettingsStore(userDataPath, app.getLocale());
   await settings.load();
+  const workspaceIndex = new WorkspaceIndexStore(userDataPath, (catalog) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC.workspaceCatalogChanged, { catalog });
+    }
+  });
+  const workspace = new WorkspaceStore(userDataPath, workspaceIndex, (snapshot) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC.workspaceChanged, { workspace: snapshot });
+    }
+  });
+  await workspace.load({
+    projectRoot: settings.get().lastDirectory,
+    pluginCanvas: settings.get().pluginCanvas,
+    browserCanvas: settings.get().browserCanvas
+  });
 
   canvasNavigationInput = new CanvasNavigationInputController(
     {
@@ -241,6 +262,80 @@ async function initializeServices(): Promise<void> {
       mainWindow.webContents.send(channel, payload);
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined);
+  actionSourceRegistry = new ActionSourceRegistry();
+  actionRunManager = new ActionRunManager(
+    workspace,
+    terminalManager,
+    (event) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.actionsRunChanged, event);
+    },
+    (approval) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.actionsApprovalRequested, { approval });
+    },
+    async (url) => {
+      const current = workspace.get();
+      if (!current.browserCanvas) {
+        const objects = [
+          ...current.terminals.map((terminal) => ({ position: terminal.position, size: terminal.size })),
+          ...current.pluginCanvas.map((plugin) => ({ position: plugin.position, size: plugin.size }))
+        ];
+        const right = objects.reduce((maximum, object) => Math.max(maximum, object.position.x + object.size.width), 0);
+        await workspace.setBrowserCanvas({ position: { x: right + 80, y: 20 }, size: { width: 920, height: 620 } });
+      }
+      await browserService!.open(url);
+    }
+  );
+  agentGateway?.setProjectActionApi({
+    list: (actor) => {
+      assertAgentWorkspace(actor.terminalSessionId, terminalManager!, workspace);
+      return {
+        workspace: { id: workspace.get().id, title: workspace.get().title, projectRoot: workspace.get().projectRoot },
+        actions: workspace.listActions()
+          .filter((action) => action.agentPolicy !== "deny")
+          .map((action) => ({
+            id: action.id,
+            title: action.title,
+            description: action.description,
+            risk: action.risk,
+            agentPolicy: action.agentPolicy,
+            concurrency: action.concurrency,
+            stepCount: action.steps.length
+          }))
+      };
+    },
+    describe: (actor, actionId) => {
+      assertAgentWorkspace(actor.terminalSessionId, terminalManager!, workspace);
+      const action = workspace.action(actionId);
+      if (!action || action.agentPolicy === "deny") throw new Error("Project action is not available to this agent.");
+      return action;
+    },
+    run: async (actor, actionId, idempotencyKey) => {
+      assertAgentWorkspace(actor.terminalSessionId, terminalManager!, workspace);
+      const origin = workspace.get().terminals.length;
+      const result = await actionRunManager!.run({
+        id: actionId,
+        position: { x: 900 + (origin % 3) * 740, y: Math.floor(origin / 3) * 470 },
+        requester: "agent",
+        requesterId: actor.agentId,
+        idempotencyKey: idempotencyKey ?? `agent:${actor.connectionId}:${actionId}`
+      });
+      return { run: result.run, focusedExisting: result.focusedExisting, needsApproval: result.needsApproval };
+    },
+    status: (actor, runId) => {
+      assertAgentWorkspace(actor.terminalSessionId, terminalManager!, workspace);
+      const run = actionRunManager!.status(runId);
+      if (!run || run.workspaceId !== workspace.get().id) throw new Error("Action run does not exist in this workspace.");
+      return run;
+    },
+    stop: async (actor, runId) => {
+      assertAgentWorkspace(actor.terminalSessionId, terminalManager!, workspace);
+      const run = actionRunManager!.status(runId);
+      if (!run || run.requester !== "agent" || run.requesterId !== actor.agentId) {
+        throw new Error("An agent may stop only its own action runs.");
+      }
+      return actionRunManager!.stop(runId);
+    }
+  });
   limitsService = new LimitsService(providerClis, app.getVersion());
   pluginManager = new PluginManager(app.getPath("userData"));
   await pluginManager.load();
@@ -268,6 +363,9 @@ async function initializeServices(): Promise<void> {
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
   registerIpc({
     settings,
+    workspace,
+    actionRuns: actionRunManager,
+    actionSources: actionSourceRegistry,
     terminals: terminalManager,
     limits: limitsService,
     plugins: pluginManager,
@@ -464,7 +562,15 @@ app.on("window-all-closed", () => {
 // Keep shared event names in the main bundle so accidental channel drift fails at build time.
 void IPC.terminalData;
 
+function assertAgentWorkspace(terminalSessionId: string, terminals: TerminalManager, workspace: WorkspaceStore): void {
+  const session = terminals.list().find((candidate) => candidate.id === terminalSessionId);
+  if (!session || session.workspaceId !== workspace.get().id) {
+    throw new Error("Project actions are available only while the agent's workspace is active.");
+  }
+}
+
 async function shutdownServices(): Promise<void> {
+  actionRunManager?.dispose();
   terminalManager?.disposeAll();
   limitsService?.dispose();
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);

@@ -9,6 +9,7 @@ import {
   MAX_BRIDGE_PAYLOAD_BYTES,
   canonicalStringify,
   isApprovedBrowserTool,
+  isProjectActionTool,
   validateToolArguments
 } from "../../../agent-browser/tool-catalog.mjs";
 
@@ -67,9 +68,16 @@ export interface RequestMessage {
   v: typeof AGENT_BRIDGE_PROTOCOL_VERSION;
   type: "request";
   id: string;
-  tool: BrowserCommandType;
+  tool: BrowserCommandType | ProjectActionToolName;
   arguments: Record<string, unknown>;
 }
+
+export type ProjectActionToolName =
+  | "project_actions_list"
+  | "project_actions_describe"
+  | "project_actions_run"
+  | "project_actions_status"
+  | "project_actions_stop";
 
 export interface HeartbeatMessage {
   v: typeof AGENT_BRIDGE_PROTOCOL_VERSION;
@@ -207,14 +215,14 @@ export function parseClientMessage(value: unknown, authenticated: boolean): Clie
   if (type === "request") {
     assertExactKeys(object, ["v", "type", "id", "tool", "arguments"]);
     const id = requiredString(object, "id", 128);
-    if (!isApprovedBrowserTool(object.tool)) throw protocolError("Unsupported browser tool.");
+    if (!isApprovedBrowserTool(object.tool)) throw protocolError("Unsupported CanvasTTY tool.");
     const validation = validateToolArguments(object.tool, object.arguments);
     if (!validation.ok) throw protocolError(validation.error);
     return {
       v: AGENT_BRIDGE_PROTOCOL_VERSION,
       type,
       id,
-      tool: object.tool as BrowserCommandType,
+      tool: object.tool as BrowserCommandType | ProjectActionToolName,
       arguments: validation.value
     };
   }
@@ -223,6 +231,7 @@ export function parseClientMessage(value: unknown, authenticated: boolean): Clie
 }
 
 export function commandFromRequest(message: RequestMessage): BrowserCommand {
+  if (isProjectActionTool(message.tool)) throw protocolError("Project action tools are dispatched by the host action service.");
   return {
     type: message.tool,
     requestId: message.id,

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserActor, BrowserResult } from "../../../shared/contracts.ts";
 import { MAX_BRIDGE_PAYLOAD_BYTES } from "../../../agent-browser/tool-catalog.mjs";
+import { isProjectActionTool } from "../../../agent-browser/tool-catalog.mjs";
 import {
   AGENT_BRIDGE_PROTOCOL_VERSION,
   HEARTBEAT_EXPIRY_MS,
@@ -74,6 +75,14 @@ export interface AgentGatewayOptions {
   now?: () => number;
 }
 
+export interface AgentProjectActionApi {
+  list(actor: Extract<BrowserActor, { kind: "agent" }>): Promise<unknown> | unknown;
+  describe(actor: Extract<BrowserActor, { kind: "agent" }>, actionId: string): Promise<unknown> | unknown;
+  run(actor: Extract<BrowserActor, { kind: "agent" }>, actionId: string, idempotencyKey?: string): Promise<unknown>;
+  status(actor: Extract<BrowserActor, { kind: "agent" }>, runId: string): Promise<unknown> | unknown;
+  stop(actor: Extract<BrowserActor, { kind: "agent" }>, runId: string): Promise<unknown>;
+}
+
 export interface RegisterAgentInput {
   terminalSessionId: string;
   provider: AgentProvider;
@@ -98,7 +107,8 @@ export class AgentGateway {
   private endpoint: string | null = null;
   private ownedRuntimeDirectory: string | null = null;
   private expiryTimer: NodeJS.Timeout | null = null;
-  private enabled = true;
+  private browserEnabled = true;
+  private actionApi: AgentProjectActionApi | null = null;
 
   constructor(browser: BrowserCoreLike, options: AgentGatewayOptions = {}) {
     this.browser = browser;
@@ -117,19 +127,15 @@ export class AgentGateway {
   }
 
   get isEnabled(): boolean {
-    return this.enabled;
+    return this.browserEnabled || this.actionApi !== null;
   }
 
   setEnabled(enabled: boolean): void {
-    if (this.enabled === enabled) return;
-    this.enabled = enabled;
-    if (enabled) return;
-    for (const lease of this.leases.values()) {
-      if (!lease.used) lease.rejectAuthenticated(new Error("Agent browser access was disabled."));
-      clearLeaseSecrets(lease);
-    }
-    this.leases.clear();
-    for (const state of [...this.acceptedConnections]) this.disconnect(state, "revoked");
+    this.browserEnabled = enabled;
+  }
+
+  setProjectActionApi(api: AgentProjectActionApi): void {
+    this.actionApi = api;
   }
 
   async start(): Promise<string> {
@@ -190,7 +196,7 @@ export class AgentGateway {
   }
 
   registerAgent(input: RegisterAgentInput): AgentCapability {
-    if (!this.enabled) throw new Error("Agent browser access is disabled.");
+    if (!this.isEnabled) throw new Error("CanvasTTY agent tools are disabled.");
     if (
       !this.endpoint
       || (!this.server && !this.windowsTransport?.isRunning)
@@ -468,17 +474,18 @@ export class AgentGateway {
       return;
     }
 
-    const command = commandFromRequest(message);
     const controller = new AbortController();
     state.controllers.set(message.id, controller);
     state.inflight += 1;
     const timeout = setTimeout(
       () => controller.abort(bridgeError("TIMEOUT", "Browser command exceeded the bridge deadline.", true)),
-      Math.min(125_000, (command.timeoutMs ?? 120_000) + 5_000)
+      Math.min(125_000, ((typeof message.arguments.timeoutMs === "number" ? message.arguments.timeoutMs : 120_000)) + 5_000)
     );
     timeout.unref();
     try {
-      const result = await this.browser.execute(actor, command, controller.signal);
+      const result = isProjectActionTool(message.tool)
+        ? await this.executeProjectAction(actor, message.id, message.tool, message.arguments)
+        : await this.executeBrowser(actor, message, controller.signal);
       if (!result || result.requestId !== message.id) {
         throw bridgeError("INTERNAL_ERROR", "Browser core returned a mismatched response.", true);
       }
@@ -491,6 +498,33 @@ export class AgentGateway {
       if (state.controllers.get(message.id) === controller) state.controllers.delete(message.id);
       state.inflight = Math.max(0, state.inflight - 1);
     }
+  }
+
+  private async executeBrowser(
+    actor: Extract<BrowserActor, { kind: "agent" }>,
+    message: Extract<ReturnType<typeof parseClientMessage>, { type: "request" }>,
+    signal: AbortSignal
+  ): Promise<BrowserResult> {
+    if (!this.browserEnabled) throw bridgeError("INVALID_REQUEST", "Agent browser access is disabled; project action tools remain available.", false);
+    return this.browser.execute(actor, commandFromRequest(message), signal);
+  }
+
+  private async executeProjectAction(
+    actor: Extract<BrowserActor, { kind: "agent" }>,
+    requestId: string,
+    tool: string,
+    args: Record<string, unknown>
+  ): Promise<BrowserResult> {
+    const api = this.actionApi;
+    if (!api) throw bridgeError("INVALID_REQUEST", "Project actions are unavailable.", true);
+    let data: unknown;
+    if (tool === "project_actions_list") data = await api.list(actor);
+    else if (tool === "project_actions_describe") data = await api.describe(actor, String(args.id));
+    else if (tool === "project_actions_run") data = await api.run(actor, String(args.id), typeof args.idempotencyKey === "string" ? args.idempotencyKey : undefined);
+    else if (tool === "project_actions_status") data = await api.status(actor, String(args.runId));
+    else if (tool === "project_actions_stop") data = await api.stop(actor, String(args.runId));
+    else throw bridgeError("INVALID_REQUEST", "Unsupported project action tool.", false);
+    return { ok: true, requestId, tabId: null, commandSequence: 0, revisionBefore: null, revisionAfter: null, data };
   }
 
   private writeResult(state: ConnectionState, id: string, result: BrowserResult): void {

@@ -1,8 +1,9 @@
-import type { LocaleId, WindowState } from "../../../shared/contracts";
+import type { LocaleId, WorkspaceCatalogSnapshot, WindowState } from "../../../shared/contracts";
 import appManifest from "../../../../package.json";
 import { ProviderIcon } from "./ProviderIcon";
 import { UiIcon } from "./UiIcon";
 import { t } from "../lib/i18n";
+import { WorkspaceMenu } from "../features/workspaces/WorkspaceMenu";
 
 const BUILD_CHANNEL = import.meta.env.DEV ? "DEV" : "RELEASE";
 const BUILD_LABEL = `${BUILD_CHANNEL} v${appManifest.version}`;
@@ -10,10 +11,34 @@ const BUILD_LABEL = `${BUILD_CHANNEL} v${appManifest.version}`;
 interface TitleBarProps {
   locale: LocaleId;
   windowState: WindowState;
+  workspaceTitle: string;
+  workspaceId: string;
+  workspaceCatalog: WorkspaceCatalogSnapshot;
+  workspaceLiveCounts: Record<string, number>;
+  onRenameWorkspace(title: string): Promise<void>;
+  onSwitchWorkspace(id: string): Promise<void>;
+  onCreateWorkspace(title: string, projectRoot: string, presetId?: string): Promise<void>;
+  onDuplicateWorkspace(id: string): Promise<void>;
+  onDeleteWorkspace(id: string): Promise<void>;
+  onOpenWorkspaceManager(): void;
   onWindowStateChange(state: WindowState): void;
 }
 
-export function TitleBar({ locale, windowState, onWindowStateChange }: TitleBarProps): React.JSX.Element | null {
+export function TitleBar({
+  locale,
+  windowState,
+  workspaceTitle,
+  workspaceId,
+  workspaceCatalog,
+  workspaceLiveCounts,
+  onRenameWorkspace,
+  onSwitchWorkspace,
+  onCreateWorkspace,
+  onDuplicateWorkspace,
+  onDeleteWorkspace,
+  onOpenWorkspaceManager,
+  onWindowStateChange
+}: TitleBarProps): React.JSX.Element | null {
   const toggleMaximize = async (): Promise<void> => {
     const state = await window.canvasTTY.window.toggleMaximize();
     onWindowStateChange(state);
@@ -41,6 +66,7 @@ export function TitleBar({ locale, windowState, onWindowStateChange }: TitleBarP
           <span className={`titlebar__build titlebar__build--${BUILD_CHANNEL.toLowerCase()}`}>{BUILD_LABEL}</span>
           <span className="titlebar__subtitle">{t(locale, "appSubtitle")}</span>
         </div>
+        <WorkspaceMenu locale={locale} catalog={workspaceCatalog} activeId={workspaceId} liveCounts={workspaceLiveCounts} onRename={onRenameWorkspace} onSwitch={onSwitchWorkspace} onCreate={onCreateWorkspace} onDuplicate={onDuplicateWorkspace} onDelete={onDeleteWorkspace} onOpenManager={onOpenWorkspaceManager} />
         <div className="titlebar__drag" />
       </header>
     );
@@ -54,6 +80,7 @@ export function TitleBar({ locale, windowState, onWindowStateChange }: TitleBarP
         <span className={`titlebar__build titlebar__build--${BUILD_CHANNEL.toLowerCase()}`}>{BUILD_LABEL}</span>
         <span className="titlebar__subtitle">{t(locale, "appSubtitle")}</span>
       </div>
+      <WorkspaceMenu locale={locale} catalog={workspaceCatalog} activeId={workspaceId} liveCounts={workspaceLiveCounts} onRename={onRenameWorkspace} onSwitch={onSwitchWorkspace} onCreate={onCreateWorkspace} onDuplicate={onDuplicateWorkspace} onDelete={onDeleteWorkspace} onOpenManager={onOpenWorkspaceManager} />
       <div className="titlebar__drag" />
       {controls}
     </header>

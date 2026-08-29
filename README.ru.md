@@ -51,6 +51,7 @@ npm run dev
 | [Центр документации](docs/README.ru.md) | [Создание виджетов](docs/widget-authoring.ru.md) |
 | [Быстрый старт](docs/getting-started.ru.md) | [Метрики и телеметрия](docs/metrics-and-telemetry.ru.md) |
 | [Встроенный браузер и журнал аудита](docs/browser.ru.md) | [Встроенный browser skill агента](agent/browser/SKILL.md) |
+| [Workspaces и Project Actions](docs/PROJECT_ACTIONS.ru.md) | [Граница actions и плагинов](docs/PROJECT_ACTIONS.ru.md#граница-плагинов) |
 | [Установка, релизы и локальные данные](docs/installing-and-security.ru.md) | [Политика безопасности](SECURITY.ru.md) |
 | [Архитектура](docs/ARCHITECTURE.ru.md) | [UI-контракт](docs/UI_CONTRACT.ru.md) |
 | [Разработка runtime-плагинов](docs/plugins.ru.md) | [Типы SDK плагинов](docs/plugin-api.d.ts) |

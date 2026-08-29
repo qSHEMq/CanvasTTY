@@ -88,6 +88,8 @@ const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
   "playlists:read",
   "playlists:write",
   "hermes:hud",
+  "actions:read",
+  "actions:run-approved",
   "network"
 ]);
 
@@ -2209,6 +2211,10 @@ const PLUGIN_SDK_SOURCE = `(() => {
       getState: () => request("hermesHud.getState"),
       open: () => request("hermesHud.open"),
       close: () => request("hermesHud.close")
+    }),
+    actions: Object.freeze({
+      list: () => request("actions.list"),
+      run: (id, idempotencyKey) => request("actions.run", { id, idempotencyKey })
     }),
     onContext: (listener) => {
       listeners.add(listener);

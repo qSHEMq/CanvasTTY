@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
-import { basename } from "node:path";
+import { accessSync, constants, statSync } from "node:fs";
+import { basename, delimiter, extname, isAbsolute, join } from "node:path";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type {
   CreateSessionRequest,
   Point,
+  ProjectActionDefinition,
+  ProjectActionStepDefinition,
   ProviderId,
   SessionBounds,
   SessionEvent,
@@ -14,7 +16,7 @@ import type {
   SessionSnapshot,
   TerminalDataEvent
 } from "../../shared/contracts.ts";
-import { IPC } from "../../shared/contracts.ts";
+import { DEFAULT_TERMINAL_SIZE, IPC } from "../../shared/contracts.ts";
 import type {
   AgentBrowserLaunchCoordinator,
   PreparedAgentBrowserPtyLaunch
@@ -38,7 +40,6 @@ import {
 
 const MAX_SCROLLBACK_CHARS = 240_000;
 const OUTPUT_BATCH_MS = 16;
-const DEFAULT_TERMINAL_SIZE = { width: 700, height: 430 };
 const MIN_TERMINAL_SIZE = { width: 420, height: 260 };
 const MAX_TERMINAL_SIZE = { width: 1_600, height: 1_100 };
 
@@ -53,6 +54,37 @@ interface ManagedSession {
   agentBrowser: PreparedAgentBrowserPtyLaunch | null;
   agentRuntime: PreparedAgentRuntimePtyLaunch | null;
   lifecycle: ProviderLifecycleParser | null;
+  launch: ManagedSessionLaunch;
+}
+
+type ManagedSessionLaunch =
+  | {
+    kind: "interactive";
+    provider: ProviderId;
+    profile: CreateSessionRequest["profile"];
+    cwd: string;
+  }
+  | {
+    kind: "action";
+    actionId: string;
+    runId: string;
+    step: ProjectActionStepDefinition;
+  };
+
+export interface TerminalCreationContext {
+  workspaceId?: string;
+  workspaceObjectId?: string;
+  size?: { width: number; height: number };
+  titleCustomized?: boolean;
+}
+
+export interface ActionTerminalCreationContext {
+  workspaceId: string;
+  workspaceObjectId: string;
+  runId: string;
+  stepId: string;
+  position: Point;
+  size?: { width: number; height: number };
 }
 
 export interface ProviderLifecycleSignal {
@@ -68,6 +100,7 @@ type Emit = (
 
 export class TerminalManager {
   private readonly sessions = new Map<string, ManagedSession>();
+  private readonly sessionListeners = new Set<(session: SessionMetadata) => void>();
   private readonly emit: Emit;
   private readonly providerClis: ProviderCliRegistry;
   private readonly agentBrowser?: AgentBrowserLaunchCoordinator;
@@ -89,7 +122,7 @@ export class TerminalManager {
     return [...this.sessions.values()].map((session) => snapshot(session));
   }
 
-  create(request: CreateSessionRequest): SessionSnapshot {
+  create(request: CreateSessionRequest, context: TerminalCreationContext = {}): SessionSnapshot {
     assertCreateRequest(request);
     assertDirectory(request.cwd);
 
@@ -97,13 +130,21 @@ export class TerminalManager {
     const metadata: SessionMetadata = {
       id,
       revision: 0,
+      workspaceId: context.workspaceId ?? "default",
+      workspaceObjectId: context.workspaceObjectId ?? null,
+      actionId: null,
+      actionRunId: null,
+      actionStepId: null,
       provider: request.provider,
       profile: request.profile,
       title: request.title?.trim() || defaultTitle(request.provider, request.cwd),
-      titleCustomized: Boolean(request.title?.trim()),
+      titleCustomized: context.titleCustomized ?? Boolean(request.title?.trim()),
       cwd: request.cwd,
       position: request.position,
-      size: DEFAULT_TERMINAL_SIZE,
+      size: context.size ? {
+        width: clamp(context.size.width, MIN_TERMINAL_SIZE.width, MAX_TERMINAL_SIZE.width),
+        height: clamp(context.size.height, MIN_TERMINAL_SIZE.height, MAX_TERMINAL_SIZE.height)
+      } : { ...DEFAULT_TERMINAL_SIZE },
       status: initialSessionStatus(request.provider),
       startedAt: Date.now(),
       exitCode: null,
@@ -122,7 +163,13 @@ export class TerminalManager {
       outputTimer: null,
       agentBrowser: launched.agentBrowser,
       agentRuntime: launched.agentRuntime,
-      lifecycle: createProviderLifecycleParser(request.provider, request.cwd)
+      lifecycle: createProviderLifecycleParser(request.provider, request.cwd),
+      launch: {
+        kind: "interactive",
+        provider: request.provider,
+        profile: request.profile,
+        cwd: request.cwd
+      }
     };
     this.sessions.set(id, session);
     if (launched.process) this.bindProcess(id, session, launched.process);
@@ -133,17 +180,105 @@ export class TerminalManager {
     return snapshot(session);
   }
 
+  createAction(
+    action: ProjectActionDefinition,
+    context: ActionTerminalCreationContext
+  ): SessionSnapshot {
+    const step = action.steps[0];
+    if (!step || step.kind !== "command") throw new Error("Project action has no command step.");
+    return this.createActionStep(action, step, context);
+  }
+
+  createActionStep(
+    action: ProjectActionDefinition,
+    step: ProjectActionStepDefinition,
+    context: ActionTerminalCreationContext
+  ): SessionSnapshot {
+    assertDirectory(step.cwd);
+    const id = randomUUID();
+    const metadata: SessionMetadata = {
+      id,
+      revision: 0,
+      workspaceId: context.workspaceId,
+      workspaceObjectId: context.workspaceObjectId,
+      actionId: action.id,
+      actionRunId: context.runId,
+      actionStepId: context.stepId,
+      provider: "terminal",
+      profile: "normal",
+      title: step.title,
+      titleCustomized: true,
+      cwd: step.cwd,
+      position: context.position,
+      size: context.size ? {
+        width: clamp(context.size.width, MIN_TERMINAL_SIZE.width, MAX_TERMINAL_SIZE.width),
+        height: clamp(context.size.height, MIN_TERMINAL_SIZE.height, MAX_TERMINAL_SIZE.height)
+      } : { ...DEFAULT_TERMINAL_SIZE },
+      status: "working",
+      startedAt: Date.now(),
+      exitCode: null,
+      failureDetails: null
+    };
+    const launched = this.spawnActionProcess(step);
+    if (!launched.process) applyActionLaunchFailure(metadata, launched.failure);
+    const session: ManagedSession = {
+      metadata,
+      process: launched.process,
+      bufferChunks: [],
+      bufferStart: 0,
+      bufferLength: 0,
+      pendingOutput: [],
+      outputTimer: null,
+      agentBrowser: null,
+      agentRuntime: null,
+      lifecycle: null,
+      launch: { kind: "action", actionId: action.id, runId: context.runId, step: structuredClone(step) }
+    };
+    this.sessions.set(id, session);
+    if (launched.process) this.bindProcess(id, session, launched.process);
+    this.emitSession(metadata);
+    return snapshot(session);
+  }
+
+  findByWorkspaceObject(objectId: string, workspaceId?: string): SessionSnapshot | null {
+    for (const session of this.sessions.values()) {
+      if (session.metadata.workspaceObjectId === objectId && (!workspaceId || session.metadata.workspaceId === workspaceId)) return snapshot(session);
+    }
+    return null;
+  }
+
+  findLatestByAction(actionId: string, workspaceId?: string): SessionSnapshot | null {
+    const matches = [...this.sessions.values()]
+      .filter((session) => session.metadata.actionId === actionId && (!workspaceId || session.metadata.workspaceId === workspaceId))
+      .sort((left, right) => right.metadata.startedAt - left.metadata.startedAt);
+    return matches[0] ? snapshot(matches[0]) : null;
+  }
+
+  findByRun(runId: string): SessionSnapshot[] {
+    return [...this.sessions.values()]
+      .filter((session) => session.metadata.actionRunId === runId)
+      .map((session) => snapshot(session));
+  }
+
+  onSession(listener: (session: SessionMetadata) => void): () => void {
+    this.sessionListeners.add(listener);
+    return () => this.sessionListeners.delete(listener);
+  }
+
+  metadata(id: string): SessionMetadata | null {
+    const session = this.sessions.get(id);
+    return session ? structuredClone(session.metadata) : null;
+  }
+
   restart(id: string): SessionSnapshot {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");
     if (session.metadata.exitCode === null) throw new Error("Terminal session is still running.");
 
-    const launched = this.spawnProcess(
-      id,
-      session.metadata.provider,
-      session.metadata.profile,
-      session.metadata.cwd
-    );
+    if (session.launch.kind === "action") {
+      return this.restartActionWithLaunch(id, session, session.launch);
+    }
+    const launched = this.spawnProcess(id, session.launch.provider, session.launch.profile, session.launch.cwd);
     session.process = launched.process;
     session.agentBrowser = launched.agentBrowser;
     session.agentRuntime = launched.agentRuntime;
@@ -161,6 +296,21 @@ export class TerminalManager {
     }
     this.emitSession(session.metadata);
     return snapshot(session);
+  }
+
+  restartAction(id: string, action: ProjectActionDefinition): SessionSnapshot {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error("Terminal session does not exist.");
+    if (session.metadata.exitCode === null) return snapshot(session);
+    const step = action.steps.find((candidate) => candidate.kind === "command");
+    if (!step) throw new Error("Project action has no command step.");
+    assertDirectory(step.cwd);
+    return this.restartActionWithLaunch(id, session, {
+      kind: "action",
+      actionId: action.id,
+      runId: session.metadata.actionRunId ?? `run-${randomUUID()}`,
+      step: structuredClone(step)
+    }, step.title);
   }
 
   input(id: string, data: string): void {
@@ -243,7 +393,9 @@ export class TerminalManager {
 
   private emitSession(metadata: SessionMetadata): void {
     metadata.revision += 1;
-    this.emit(IPC.terminalSession, { session: structuredClone(metadata) });
+    const event = structuredClone(metadata);
+    for (const listener of this.sessionListeners) listener(event);
+    this.emit(IPC.terminalSession, { session: event });
   }
 
   private spawnProcess(
@@ -299,6 +451,60 @@ export class TerminalManager {
     }
   }
 
+  private spawnActionProcess(step: ProjectActionStepDefinition): { process: IPty | null; failure: string | null } {
+    try {
+      const launch = step.execution === "argv"
+        ? actionArgvLaunch(step.executable, step.args)
+        : actionShellLaunch(step.command);
+      return {
+        process: pty.spawn(launch.command, launch.args, {
+          name: "xterm-256color",
+          cols: 100,
+          rows: 30,
+          cwd: step.cwd,
+          env: terminalEnvironment()
+        }),
+        failure: null
+      };
+    } catch (error) {
+      return {
+        process: null,
+        failure: error instanceof Error ? error.message : "Project action could not be launched."
+      };
+    }
+  }
+
+  private restartActionWithLaunch(
+    id: string,
+    session: ManagedSession,
+    launch: Extract<ManagedSessionLaunch, { kind: "action" }>,
+    title = session.metadata.title
+  ): SessionSnapshot {
+    const launched = this.spawnActionProcess(launch.step);
+    session.process = launched.process;
+    session.agentBrowser = null;
+    session.agentRuntime = null;
+    session.lifecycle = null;
+    session.launch = launch;
+    session.metadata.actionId = launch.actionId;
+    session.metadata.actionRunId = launch.runId;
+    session.metadata.actionStepId = launch.step.id;
+    session.metadata.title = title;
+    session.metadata.titleCustomized = true;
+    session.metadata.cwd = launch.step.cwd;
+    session.metadata.startedAt = Date.now();
+    if (!launched.process) {
+      applyActionLaunchFailure(session.metadata, launched.failure);
+    } else {
+      session.metadata.status = "working";
+      session.metadata.exitCode = null;
+      session.metadata.failureDetails = null;
+      this.bindProcess(id, session, launched.process);
+    }
+    this.emitSession(session.metadata);
+    return snapshot(session);
+  }
+
   private bindProcess(id: string, session: ManagedSession, process: IPty): void {
     process.onData((data) => {
       const current = this.sessions.get(id);
@@ -352,6 +558,75 @@ function applyLaunchFailure(metadata: SessionMetadata, failure: UnavailableProvi
   metadata.status = "failed";
   metadata.exitCode = 127;
   metadata.failureDetails = failure.diagnostic;
+}
+
+function applyActionLaunchFailure(metadata: SessionMetadata, failure: string | null): void {
+  metadata.status = "failed";
+  metadata.exitCode = 127;
+  metadata.failureDetails = failure || "Project action could not be launched.";
+}
+
+export function actionShellLaunch(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): { command: string; args: string[] } {
+  if (typeof command !== "string" || command.trim().length === 0) {
+    throw new Error("Project action command is required.");
+  }
+  const shell = resolveTerminalLaunch("terminal", "normal", [], { platform });
+  if (platform !== "win32") return { command: shell.command, args: ["-lc", command] };
+  const executable = basename(shell.command).toLowerCase();
+  if (executable === "powershell.exe" || executable === "pwsh.exe" || executable === "pwsh") {
+    const shellArgs = Array.isArray(shell.args) ? shell.args : [];
+    return { command: shell.command, args: [...shellArgs, "-Command", command] };
+  }
+  return { command: shell.command, args: ["/d", "/s", "/c", command] };
+}
+
+export function actionArgvLaunch(
+  executable: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  environment: Readonly<Record<string, string | undefined>> = process.env
+): { command: string; args: string[] } {
+  if (typeof executable !== "string" || executable.trim().length === 0 || executable.includes("\0")) {
+    throw new Error("Project action executable is required.");
+  }
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
+    throw new Error("Project action arguments are invalid.");
+  }
+  const resolved = resolveActionExecutable(executable.trim(), platform, environment);
+  const extension = extname(resolved).toLowerCase();
+  if (platform === "win32" && (extension === ".cmd" || extension === ".bat")) {
+    const shell = resolveTerminalLaunch("terminal", "normal", [], { platform });
+    return { command: shell.command, args: ["/d", "/s", "/c", resolved, ...args] };
+  }
+  return { command: resolved, args: [...args] };
+}
+
+function resolveActionExecutable(
+  executable: string,
+  platform: NodeJS.Platform,
+  environment: Readonly<Record<string, string | undefined>>
+): string {
+  const extensions = platform === "win32"
+    ? (environment.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+    : [""];
+  const candidates = isAbsolute(executable) || executable.includes("/") || executable.includes("\\")
+    ? [executable]
+    : (environment.PATH ?? "").split(delimiter).filter(Boolean).flatMap((directory) => (
+      extname(executable) ? [join(directory, executable)] : extensions.map((extension) => join(directory, `${executable}${extension.toLowerCase()}`))
+    ));
+  for (const candidate of candidates) {
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      if (platform !== "win32") accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Continue through PATH candidates.
+    }
+  }
+  throw new Error(`Project action executable is unavailable: ${executable}`);
 }
 
 export function terminalEnvironment(

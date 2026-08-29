@@ -15,6 +15,8 @@ preload bridge (contextBridge)
     ▼
 Electron main process
     ├── SettingsStore  → проверенное атомарное JSON-хранилище
+    ├── WorkspaceIndexStore / WorkspaceStore → versioned каталог и документы workspace
+    ├── ActionSourceRegistry / ActionRunManager → ограниченное обнаружение и наблюдаемые action runs
     ├── TerminalManager → lifecycle node-pty, ограниченный scrollback и batching вывода
     ├── LimitsService  → очищенные adapters лимитов и кэш
     ├── PluginManager  → установка из GitHub, manifest, assets, permissions, storage
@@ -32,6 +34,8 @@ Electron main process
 - `src/main/services/TerminalManager.ts` — источник истины для живого состояния сессий и PTY buffers. Scrollback хранится в ограниченном chunk-буфере, а PTY data объединяются в IPC-пакеты по 16 мс. Обычный терминал стартует как `idle`, агент остаётся `unavailable` до первого машинного lifecycle-сигнала провайдера. После этого Codex, Claude Code, Qwen Code, Kimi Code, OpenCode, Hermes и Grok Build переходят между `idle`, `working` и `needs_approval` по provider hooks; точные OSC 0/2 markers Claude/Qwen сохранены как fallback совместимости. Человекочитаемый terminal text и само существование PTY не считаются активностью. Завершение процесса даёт только `done` или `failed`.
 - `src/main/services/LimitsService.ts` читает Codex через app-server protocol установленного CLI, а Claude, Kimi, OpenCode Go и Grok Build — через provider usage/billing endpoints. Qwen Code мультипровайдерный и не имеет provider-neutral quota-read protocol, поэтому его adapter честно возвращает `cli-not-found` или `unsupported-protocol`, не выдумывая проценты. Credentials читаются только в доверенном main-процессе, отправляются только соответствующему провайдеру по HTTPS, не логируются и не выходят через IPC. Сервис отвечает за timeout, structural normalization, cache, stale fallback и cleanup подпроцессов; сырые ответы провайдеров через IPC не проходят.
 - `src/main/services/SettingsStore.ts` нормализует каждое изменение и сохраняет его сериализованной атомарной записью.
+- `src/main/services/WorkspaceIndexStore.ts` владеет каталогом, active workspace и reusable presets. `WorkspaceStore.ts` переносит legacy canvas geometry, нормализует versioned documents, сериализует mutations и пишет их атомарно. У сохранённой terminal card есть стабильный object ID, не зависящий от временного PTY session ID, поэтому после старта показывается честный stopped placeholder.
+- `src/main/services/ActionSourceRegistry.ts` ограниченно и read-only обнаруживает известные источники проектных команд, не исполняя код репозитория. `ActionRunManager.ts` владеет DAG execution, связью с PTY, healthchecks, browser preview, concurrency, idempotency, approvals, stop/retry и ограниченной структурированной историей. Агент и плагин передают только action ID; host сам находит неизменяемое определение и применяет requester-bound policy.
 - `src/main/services/PluginManager.ts` устанавливает готовые статические репозитории без выполнения package scripts, отклоняет symlinks и слишком большие пакеты, хранит реестр включения, отдаёт только файлы внутри пакета и применяет permissions/storage quotas для каждого плагина.
 - `src/main/services/PluginSecretsService.ts` сериализует запись секретов каждого плагина, шифрует весь ограниченный payload через Electron `safeStorage`, отклоняет plaintext-only backend и удаляет зашифрованный файл при uninstall.
 - `src/main/services/PluginMediaService.ts` сохраняет разрешения только после нативного выбора папки, скрывает абсолютные пути, пропускает symlinks и отдаёт аудио с HTTP Range. Чтение плейлистов остаётся внутри разрешённых библиотек; ограниченная атомарная запись разрешена только в `Playlists/`.
@@ -60,9 +64,14 @@ App
 │   │   ├── homeModel      чистое получение строк лимитов/активных сессий
 │   │   └── HomeMediaWidget независимые pick/replace/remove controls
 │   ├── TerminalCard       xterm, selection, rename, drag, resize и snap
+│   ├── TerminalPlaceholder сохранённая stopped card с явными start/remove
+│   ├── GroupFrame         перемещаемая, сворачиваемая и lockable группа
 │   ├── PluginCanvasCard   sandboxed plugin app с bounds и summary
 │   └── BrowserCard        доверенный browser chrome и geometry для native view
 ├── AgentLaunchDialog      фиксированный provider + folder + profile + launch
+├── ActionsPanel           discovery, editor, approval, runs, stop и retry
+├── WorkspacePanel         layout, views, templates, presets и transfer
+├── CommandPalette         поиск действий через `Ctrl/Cmd+Shift+P`
 └── SettingsPanel          General, Appearance, Controls и Plugins
     └── PluginSettingsSection preview, permissions, registry и contributions
 ```

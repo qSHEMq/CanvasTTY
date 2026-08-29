@@ -6,6 +6,7 @@ import closeIcon from "../assets/icons/lucide/x.svg";
 import copyIcon from "../assets/icons/lucide/copy.svg";
 import errorIcon from "../assets/icons/lucide/circle-alert.svg";
 import folderIcon from "../assets/icons/lucide/folder.svg";
+import focusIcon from "../assets/icons/lucide/focus.svg";
 import browserIcon from "../assets/icons/lucide/globe.svg";
 import homeIcon from "../assets/icons/lucide/house.svg";
 import imagePlusIcon from "../assets/icons/lucide/image-plus.svg";
@@ -16,6 +17,7 @@ import settingsIcon from "../assets/icons/lucide/settings.svg";
 import terminalIcon from "../assets/icons/lucide/square-terminal.svg";
 import trashIcon from "../assets/icons/lucide/trash-2.svg";
 import workingIcon from "../assets/icons/lucide/loader-circle.svg";
+import boltIcon from "../assets/icons/lucide/zap.svg";
 import zoomInIcon from "../assets/icons/lucide/zoom-in.svg";
 import zoomOutIcon from "../assets/icons/lucide/zoom-out.svg";
 
@@ -30,6 +32,7 @@ export type UiIconName =
   | "restore"
   | "copy"
   | "folder"
+  | "focus"
   | "browser"
   | "terminal"
   | "reload"
@@ -40,6 +43,7 @@ export type UiIconName =
   | "image-plus"
   | "trash"
   | "working"
+  | "bolt"
   | "attention"
   | "error"
   | "done";
@@ -60,6 +64,7 @@ const ICONS: Record<UiIconName, string> = {
   restore: copyIcon,
   copy: copyIcon,
   folder: folderIcon,
+  focus: focusIcon,
   browser: browserIcon,
   terminal: terminalIcon,
   reload: workingIcon,
@@ -70,6 +75,7 @@ const ICONS: Record<UiIconName, string> = {
   "image-plus": imagePlusIcon,
   trash: trashIcon,
   working: workingIcon,
+  bolt: boltIcon,
   attention: attentionIcon,
   error: errorIcon,
   done: checkIcon

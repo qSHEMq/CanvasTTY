@@ -101,6 +101,8 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `playlists:read` | `playlists.list`, `playlists.read` | Reads `.m3u`, `.m3u8`, and `.pls` in a granted music folder plus `.json` under its `Playlists/` directory, up to 4 MB each |
 | `playlists:write` | `playlists.write` | Atomically writes a named playlist into the granted folder's `Playlists/` directory, up to 4 MB |
 | `hermes:hud` | `hermesHud.*` | Starts the installed Hermes Desktop in its real HUD mode, reads its live runtime state, or asks the app to quit; no arbitrary command or process API is exposed |
+| `actions:read` | `actions.list` | Lists only the active workspace actions whose external policy is not `deny`; exact definitions remain host-owned |
+| `actions:run-approved` | `actions.run` | Requests an existing action by immutable ID; `ask` still requires human approval and no shell, cwd, arguments, or approval token crosses the plugin boundary |
 | `network` | browser `fetch` | Allows HTTPS and loopback requests in the plugin CSP; no CanvasTTY credentials are attached |
 
 Declaring a permission does not expose a generic IPC channel. Unknown methods and permissions are rejected.
@@ -136,6 +138,8 @@ await host.request("browser.open", { url: "http://localhost:9210" });
 const hermes = await host.hermesHud.getState();
 if (hermes.state === "stopped") await host.hermesHud.open();
 if (hermes.state === "running") await host.hermesHud.close();
+const actions = await host.actions.list();
+if (actions[0]) await host.actions.run(actions[0].id, "refresh-once");
 
 const library = await host.media.pickLibrary();
 if (library) {
@@ -148,7 +152,7 @@ if (library) {
 }
 ```
 
-Supported methods are `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*`, `playlists.*`, and `hermesHud.*`. `canvas.open` opens or focuses a `canvas-app` contribution from the same plugin, placing it beside the requesting canvas card when possible. `browser.open` completes only after the workspace creates or focuses its Browser card and navigates it once; it accepts normalized HTTP(S) URLs only (not free-text searches, `file:`, `data:`, `javascript:`, `about:`, or credentialed URLs). `window.open` may target only a `window` contribution declared by the same plugin. `hermesHud.open` and `hermesHud.close` use a fixed Hermes control contract; plugins cannot choose an executable, arguments, or PID.
+Supported methods are `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*`, `playlists.*`, `hermesHud.*`, and `actions.*`. `canvas.open` opens or focuses a `canvas-app` contribution from the same plugin, placing it beside the requesting canvas card when possible. `browser.open` completes only after the workspace creates or focuses its Browser card and navigates it once; it accepts normalized HTTP(S) URLs only (not free-text searches, `file:`, `data:`, `javascript:`, `about:`, or credentialed URLs). `window.open` may target only a `window` contribution declared by the same plugin. `hermesHud.open` and `hermesHud.close` use a fixed Hermes control contract; plugins cannot choose an executable, arguments, or PID. `actions.run` accepts only a host-defined action ID and an optional idempotency key; see [Workspaces and Project Actions](PROJECT_ACTIONS.md#plugin-boundary).
 
 Use `storage` for non-sensitive JSON preferences and `secrets` only for credentials such as OAuth tokens or API keys. Secrets are string-only, limited to 32 keys / 16 KB per value / 64 KB per plugin, removed on uninstall, and never fall back to plaintext storage. A secret call fails explicitly when the operating system cannot provide protected encryption.
 

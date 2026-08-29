@@ -26,6 +26,8 @@ export interface CanvasTTYPluginHost {
   request(method: "hermesHud.getState"): Promise<CanvasTTYPluginHermesHudSnapshot>;
   request(method: "hermesHud.open"): Promise<CanvasTTYPluginHermesHudSnapshot>;
   request(method: "hermesHud.close"): Promise<CanvasTTYPluginHermesHudSnapshot>;
+  request(method: "actions.list"): Promise<CanvasTTYPluginAction[]>;
+  request(method: "actions.run", params: { id: string; idempotencyKey?: string }): Promise<CanvasTTYPluginActionRunResult>;
   request(method: "secrets.get", params: { key: string }): Promise<string | null>;
   request(method: "secrets.set", params: { key: string; value: string }): Promise<null>;
   request(method: "secrets.delete", params: { key: string }): Promise<null>;
@@ -58,6 +60,10 @@ export interface CanvasTTYPluginHost {
     open(): Promise<CanvasTTYPluginHermesHudSnapshot>;
     close(): Promise<CanvasTTYPluginHermesHudSnapshot>;
   };
+  actions: {
+    list(): Promise<CanvasTTYPluginAction[]>;
+    run(id: string, idempotencyKey?: string): Promise<CanvasTTYPluginActionRunResult>;
+  };
   onContext(listener: (context: CanvasTTYPluginContext) => void): () => void;
   onStorageChange(listener: (key: string, value: unknown) => void): () => void;
 }
@@ -68,7 +74,7 @@ export interface CanvasTTYPluginContext {
     id: string;
     name: string;
     version: string;
-    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network">;
+    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "actions:read" | "actions:run-approved" | "network">;
     modules: string[];
   };
   contribution: {
@@ -123,3 +129,19 @@ export type CanvasTTYPluginHermesHudSnapshot =
 export type CanvasTTYPluginLimitsResult =
   | { state: "loading"; snapshot: null }
   | { state: "ready"; snapshot: unknown };
+
+export interface CanvasTTYPluginAction {
+  id: string;
+  title: string;
+  description: string;
+  command: string;
+  cwd: string;
+  risk: "safe" | "write" | "dangerous";
+  agentPolicy: "ask" | "allow";
+}
+
+export interface CanvasTTYPluginActionRunResult {
+  run: { id: string; actionId: string; status: string; steps: unknown[] };
+  focusedExisting: boolean;
+  needsApproval: boolean;
+}

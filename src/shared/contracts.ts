@@ -149,9 +149,346 @@ export interface CreateSessionRequest {
   title?: string;
 }
 
+export const WORKSPACE_SCHEMA_VERSION = 2;
+export const DEFAULT_WORKSPACE_ID = "default";
+export const DEFAULT_TERMINAL_SIZE: Size = { width: 700, height: 430 };
+
+export type WorkspaceObjectKind = "terminal" | "group" | "browser" | "plugin";
+export type WorkspaceGroupColor = "sage" | "lilac" | "blue" | "sand" | "rose" | "slate";
+export type WorkspaceArrangeMode = "grid" | "columns" | "rows";
+
+export interface WorkspaceSummary {
+  id: string;
+  title: string;
+  projectRoot: string;
+  objectCount: number;
+  updatedAt: number;
+}
+
+export interface WorkspaceCatalogSnapshot {
+  revision: number;
+  activeId: string;
+  workspaces: WorkspaceSummary[];
+  presets: WorkspacePreset[];
+}
+
+export interface WorkspaceCreateInput {
+  title: string;
+  projectRoot: string;
+  presetId?: string;
+}
+
+export interface WorkspaceSwitchResult {
+  catalog: WorkspaceCatalogSnapshot;
+  workspace: WorkspaceDocument;
+}
+
+export interface WorkspaceTerminal {
+  id: string;
+  kind: "terminal";
+  actionId: string | null;
+  provider: ProviderId;
+  profile: LaunchProfileId;
+  title: string;
+  titleCustomized: boolean;
+  cwd: string;
+  position: Point;
+  size: Size;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkspaceGroup {
+  id: string;
+  kind: "group";
+  title: string;
+  color: WorkspaceGroupColor;
+  position: Point;
+  size: Size;
+  memberIds: string[];
+  collapsed: boolean;
+  locked: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkspaceGroupInput {
+  title: string;
+  color: WorkspaceGroupColor;
+  position: Point;
+  size: Size;
+  memberIds: string[];
+}
+
+export interface WorkspaceGroupUpdate extends Partial<WorkspaceGroupInput> {
+  id: string;
+  collapsed?: boolean;
+  locked?: boolean;
+}
+
+export interface WorkspaceSavedView {
+  id: string;
+  title: string;
+  camera: CameraState;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkspaceSavedViewInput {
+  title: string;
+  camera: CameraState;
+}
+
+export interface TerminalTemplate {
+  id: string;
+  title: string;
+  provider: ProviderId;
+  profile: LaunchProfileId;
+  cwd: string;
+  command: string | null;
+  size: Size;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TerminalTemplateInput {
+  title: string;
+  provider: ProviderId;
+  profile: LaunchProfileId;
+  cwd: string;
+  command?: string | null;
+  size?: Size;
+}
+
+export interface TerminalTemplateUpdate extends Partial<TerminalTemplateInput> {
+  id: string;
+}
+
+export type ProjectActionRisk = "safe" | "write" | "dangerous";
+export type ProjectActionConcurrency = "focus-existing" | "parallel";
+export type ProjectActionAgentPolicy = "deny" | "ask" | "allow";
+export type ProjectActionSourceKind =
+  | "manual"
+  | "package-json"
+  | "just"
+  | "make"
+  | "taskfile"
+  | "docker-compose"
+  | "script";
+export type ProjectActionExecution = "shell" | "argv";
+export type ProjectActionStepKind = "command" | "http-health" | "tcp-health" | "open-url";
+export type ProjectActionStepMode = "task" | "service";
+
+export interface ProjectActionStepDefinition {
+  id: string;
+  title: string;
+  kind: ProjectActionStepKind;
+  mode: ProjectActionStepMode;
+  execution: ProjectActionExecution;
+  command: string;
+  executable: string;
+  args: string[];
+  cwd: string;
+  dependsOn: string[];
+  timeoutMs: number;
+  url: string | null;
+  host: string | null;
+  port: number | null;
+}
+
+export type ProjectActionStepInput = Partial<ProjectActionStepDefinition> & Pick<ProjectActionStepDefinition, "title" | "kind">;
+
+export interface ProjectActionSource {
+  kind: ProjectActionSourceKind;
+  path: string;
+  key: string;
+}
+
+export interface ProjectActionDefinition {
+  id: string;
+  title: string;
+  description: string;
+  command: string;
+  cwd: string;
+  risk: ProjectActionRisk;
+  concurrency: ProjectActionConcurrency;
+  agentPolicy: ProjectActionAgentPolicy;
+  steps: ProjectActionStepDefinition[];
+  autoGroup: boolean;
+  autoArrange: WorkspaceArrangeMode;
+  source: ProjectActionSource | null;
+  revision: number;
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProjectActionInput {
+  title: string;
+  description: string;
+  command: string;
+  cwd: string;
+  risk: ProjectActionRisk;
+  concurrency: ProjectActionConcurrency;
+  agentPolicy?: ProjectActionAgentPolicy;
+  steps?: ProjectActionStepInput[];
+  autoGroup?: boolean;
+  autoArrange?: WorkspaceArrangeMode;
+  source?: ProjectActionSource | null;
+  pinned?: boolean;
+}
+
+export interface ProjectActionUpdate extends Partial<ProjectActionInput> {
+  id: string;
+}
+
+export interface RunProjectActionRequest {
+  id: string;
+  position: Point;
+  terminalObjectId?: string;
+  requester?: "user" | "agent" | "plugin";
+  requesterId?: string;
+  approvalToken?: string;
+  idempotencyKey?: string;
+}
+
+export interface RunProjectActionResult {
+  run: ActionRunSnapshot;
+  session: SessionSnapshot | null;
+  focusedExisting: boolean;
+  needsApproval: boolean;
+  approvalToken?: string;
+}
+
+export type ActionRunStatus =
+  | "waiting-approval"
+  | "queued"
+  | "running"
+  | "ready"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export type ActionStepRunStatus =
+  | "pending"
+  | "running"
+  | "ready"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "skipped";
+
+export interface ActionStepRunSnapshot {
+  stepId: string;
+  title: string;
+  status: ActionStepRunStatus;
+  terminalSessionId: string | null;
+  terminalObjectId: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  exitCode: number | null;
+  message: string | null;
+}
+
+export interface ActionRunSnapshot {
+  id: string;
+  actionId: string;
+  actionRevision: number;
+  workspaceId: string;
+  requester: "user" | "agent" | "plugin";
+  requesterId: string | null;
+  status: ActionRunStatus;
+  steps: ActionStepRunSnapshot[];
+  startedAt: number;
+  finishedAt: number | null;
+  idempotencyKey: string | null;
+}
+
+export interface ActionRunEvent {
+  run: ActionRunSnapshot;
+}
+
+export interface ActionApprovalRequest {
+  token: string;
+  actionId: string;
+  actionRevision: number;
+  requester: "user" | "agent" | "plugin";
+  requesterId: string;
+  expiresAt: number;
+}
+
+export interface ActionApprovalEvent {
+  approval: ActionApprovalRequest;
+}
+
+export interface DiscoveredAction {
+  importId: string;
+  input: ProjectActionInput;
+  available: boolean;
+  message: string | null;
+}
+
+export interface ActionDiscoveryResult {
+  root: string;
+  sources: Array<{ kind: ProjectActionSourceKind; path: string; count: number; error: string | null }>;
+  actions: DiscoveredAction[];
+}
+
+export interface WorkspaceDocument {
+  schemaVersion: typeof WORKSPACE_SCHEMA_VERSION;
+  id: string;
+  revision: number;
+  title: string;
+  projectRoot: string;
+  camera: CameraState;
+  terminals: WorkspaceTerminal[];
+  groups: WorkspaceGroup[];
+  savedViews: WorkspaceSavedView[];
+  templates: TerminalTemplate[];
+  actions: ProjectActionDefinition[];
+  actionRuns: ActionRunSnapshot[];
+  pluginCanvas: PluginCanvasInstance[];
+  browserCanvas: BrowserCanvasState | null;
+  updatedAt: number;
+}
+
+export interface WorkspacePreset {
+  id: string;
+  title: string;
+  description: string;
+  groups: Array<Omit<WorkspaceGroup, "id" | "memberIds" | "createdAt" | "updatedAt">>;
+  templates: Array<Omit<TerminalTemplate, "id" | "createdAt" | "updatedAt">>;
+  actions: Array<Omit<ProjectActionDefinition, "id" | "createdAt" | "updatedAt" | "source" | "revision">>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkspacePresetInput {
+  title: string;
+  description: string;
+}
+
+export interface WorkspaceEvent {
+  workspace: WorkspaceDocument;
+}
+
+export interface WorkspaceCatalogEvent {
+  catalog: WorkspaceCatalogSnapshot;
+}
+
+export interface WorkspaceTerminalBoundsRequest {
+  id: string;
+  bounds: SessionBounds;
+}
+
 export interface SessionMetadata {
   id: string;
   revision: number;
+  workspaceId: string;
+  workspaceObjectId: string | null;
+  actionId: string | null;
+  actionRunId: string | null;
+  actionStepId: string | null;
   provider: ProviderId;
   profile: LaunchProfileId;
   title: string;
@@ -207,6 +544,8 @@ export type PluginPermission =
   | "playlists:read"
   | "playlists:write"
   | "hermes:hud"
+  | "actions:read"
+  | "actions:run-approved"
   | "network";
 
 export type HermesHudSnapshot =
@@ -768,6 +1107,54 @@ export interface CanvasTTYApi {
     get(): Promise<AppSettings>;
     update(patch: Partial<AppSettings>): Promise<AppSettings>;
   };
+  workspace: {
+    catalog(): Promise<WorkspaceCatalogSnapshot>;
+    get(): Promise<WorkspaceDocument>;
+    create(input: WorkspaceCreateInput): Promise<WorkspaceSwitchResult>;
+    switch(id: string): Promise<WorkspaceSwitchResult>;
+    duplicate(id: string, title?: string): Promise<WorkspaceSwitchResult>;
+    delete(id: string): Promise<WorkspaceSwitchResult>;
+    rename(title: string): Promise<WorkspaceDocument>;
+    setProjectRoot(path: string): Promise<WorkspaceDocument>;
+    setCamera(camera: CameraState): Promise<WorkspaceDocument>;
+    startTerminal(id: string): Promise<SessionSnapshot>;
+    setTerminalBounds(request: WorkspaceTerminalBoundsRequest): Promise<WorkspaceDocument>;
+    removeTerminal(id: string): Promise<WorkspaceDocument>;
+    setPluginCanvas(instances: PluginCanvasInstance[]): Promise<WorkspaceDocument>;
+    setBrowserCanvas(bounds: BrowserCanvasState | null): Promise<WorkspaceDocument>;
+    createGroup(input: WorkspaceGroupInput): Promise<WorkspaceDocument>;
+    updateGroup(input: WorkspaceGroupUpdate): Promise<WorkspaceDocument>;
+    moveGroup(id: string, position: Point): Promise<WorkspaceDocument>;
+    removeGroup(id: string, removeMembers?: boolean): Promise<WorkspaceDocument>;
+    autoArrange(mode: WorkspaceArrangeMode, objectIds?: string[]): Promise<WorkspaceDocument>;
+    saveView(input: WorkspaceSavedViewInput): Promise<WorkspaceDocument>;
+    removeView(id: string): Promise<WorkspaceDocument>;
+    createTemplate(input: TerminalTemplateInput): Promise<WorkspaceDocument>;
+    updateTemplate(input: TerminalTemplateUpdate): Promise<WorkspaceDocument>;
+    removeTemplate(id: string): Promise<WorkspaceDocument>;
+    runTemplate(id: string, position: Point): Promise<SessionSnapshot>;
+    savePreset(input: WorkspacePresetInput): Promise<WorkspaceCatalogSnapshot>;
+    removePreset(id: string): Promise<WorkspaceCatalogSnapshot>;
+    export(): Promise<string>;
+    import(raw: string): Promise<WorkspaceSwitchResult>;
+    onChanged(listener: (event: WorkspaceEvent) => void): () => void;
+    onCatalogChanged(listener: (event: WorkspaceCatalogEvent) => void): () => void;
+  };
+  actions: {
+    list(): Promise<ProjectActionDefinition[]>;
+    runs(): Promise<ActionRunSnapshot[]>;
+    create(input: ProjectActionInput): Promise<WorkspaceDocument>;
+    update(input: ProjectActionUpdate): Promise<WorkspaceDocument>;
+    remove(id: string): Promise<WorkspaceDocument>;
+    run(request: RunProjectActionRequest): Promise<RunProjectActionResult>;
+    approve(token: string): Promise<RunProjectActionResult>;
+    stop(runId: string): Promise<ActionRunSnapshot>;
+    retry(runId: string, stepId?: string): Promise<RunProjectActionResult>;
+    discover(root: string): Promise<ActionDiscoveryResult>;
+    import(inputs: ProjectActionInput[]): Promise<WorkspaceDocument>;
+    onRun(listener: (event: ActionRunEvent) => void): () => void;
+    onApproval(listener: (event: ActionApprovalEvent) => void): () => void;
+  };
   dialog: {
     pickDirectory(defaultPath?: string): Promise<string | null>;
     pickMedia(): Promise<MediaSelection | null>;
@@ -811,6 +1198,8 @@ export interface CanvasTTYApi {
     hermesHudStatus(pluginId: string): Promise<HermesHudSnapshot>;
     hermesHudOpen(pluginId: string): Promise<HermesHudSnapshot>;
     hermesHudClose(pluginId: string): Promise<HermesHudSnapshot>;
+    actionsList(pluginId: string): Promise<ProjectActionDefinition[]>;
+    actionsRun(pluginId: string, actionId: string, idempotencyKey?: string): Promise<RunProjectActionResult>;
     onOpenLauncher(listener: (event: PluginLauncherRequest) => void): () => void;
     onOpenCanvas(listener: (event: PluginCanvasRequest) => void): () => void;
     onBrowserOpenRequested(listener: (event: PluginBrowserOpenRequest) => void): () => void;
@@ -882,6 +1271,50 @@ export const IPC = {
   clipboardWrite: "clipboard:write",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
+  workspaceGet: "workspace:get",
+  workspaceCatalog: "workspace:catalog",
+  workspaceCreate: "workspace:create",
+  workspaceSwitch: "workspace:switch",
+  workspaceDuplicate: "workspace:duplicate",
+  workspaceDelete: "workspace:delete",
+  workspaceRename: "workspace:rename",
+  workspaceProjectRoot: "workspace:project-root",
+  workspaceCamera: "workspace:camera",
+  workspaceStartTerminal: "workspace:start-terminal",
+  workspaceTerminalBounds: "workspace:terminal-bounds",
+  workspaceRemoveTerminal: "workspace:remove-terminal",
+  workspacePluginCanvas: "workspace:plugin-canvas",
+  workspaceBrowserCanvas: "workspace:browser-canvas",
+  workspaceGroupCreate: "workspace:group-create",
+  workspaceGroupUpdate: "workspace:group-update",
+  workspaceGroupMove: "workspace:group-move",
+  workspaceGroupRemove: "workspace:group-remove",
+  workspaceAutoArrange: "workspace:auto-arrange",
+  workspaceViewSave: "workspace:view-save",
+  workspaceViewRemove: "workspace:view-remove",
+  workspaceTemplateCreate: "workspace:template-create",
+  workspaceTemplateUpdate: "workspace:template-update",
+  workspaceTemplateRemove: "workspace:template-remove",
+  workspaceTemplateRun: "workspace:template-run",
+  workspacePresetSave: "workspace:preset-save",
+  workspacePresetRemove: "workspace:preset-remove",
+  workspaceExport: "workspace:export",
+  workspaceImport: "workspace:import",
+  workspaceChanged: "workspace:changed",
+  workspaceCatalogChanged: "workspace:catalog-changed",
+  actionsList: "actions:list",
+  actionsRuns: "actions:runs",
+  actionsCreate: "actions:create",
+  actionsUpdate: "actions:update",
+  actionsRemove: "actions:remove",
+  actionsRun: "actions:run",
+  actionsApprove: "actions:approve",
+  actionsStop: "actions:stop",
+  actionsRetry: "actions:retry",
+  actionsDiscover: "actions:discover",
+  actionsImport: "actions:import",
+  actionsRunChanged: "actions:run-changed",
+  actionsApprovalRequested: "actions:approval-requested",
   dialogPickDirectory: "dialog:pick-directory",
   dialogPickMedia: "dialog:pick-media",
   mediaRead: "media:read",
@@ -918,6 +1351,8 @@ export const IPC = {
   pluginsHermesHudStatus: "plugins:hermes-hud-status",
   pluginsHermesHudOpen: "plugins:hermes-hud-open",
   pluginsHermesHudClose: "plugins:hermes-hud-close",
+  pluginsActionsList: "plugins:actions-list",
+  pluginsActionsRun: "plugins:actions-run",
   pluginsHostInvoke: "plugins:host-invoke",
   pluginsLauncherRequested: "plugins:launcher-requested",
   pluginsCanvasRequested: "plugins:canvas-requested",

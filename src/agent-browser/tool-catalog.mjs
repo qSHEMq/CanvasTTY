@@ -119,7 +119,21 @@ export const TOOL_DEFINITIONS = Object.freeze([
   tool("browser_get_activity", "Read the bounded audit stream for this browser connection.", {
     cursor,
     limit
-  })
+  }),
+  tool("project_actions_list", "List named, project-approved CanvasTTY actions. This never accepts an arbitrary shell command."),
+  tool("project_actions_describe", "Describe one named CanvasTTY action, including its fixed steps, risk, and approval policy.", {
+    id
+  }, ["id"]),
+  tool("project_actions_run", "Run one named CanvasTTY action by stable ID. The saved command cannot be overridden; risky actions wait for user approval.", {
+    id,
+    idempotencyKey: string({ minLength: 1, maxLength: 120 })
+  }, ["id"]),
+  tool("project_actions_status", "Read structured status for an action run returned by project_actions_run.", {
+    runId: id
+  }, ["runId"]),
+  tool("project_actions_stop", "Stop an action run started by this agent connection.", {
+    runId: id
+  }, ["runId"])
 ]);
 
 const TOOL_BY_NAME = new Map(TOOL_DEFINITIONS.map((definition) => [definition.name, definition]));
@@ -128,6 +142,18 @@ export const APPROVED_BROWSER_TOOL_NAMES = Object.freeze(TOOL_DEFINITIONS.map(({
 
 export function isApprovedBrowserTool(value) {
   return typeof value === "string" && TOOL_BY_NAME.has(value);
+}
+
+const PROJECT_ACTION_TOOLS = new Set([
+  "project_actions_list",
+  "project_actions_describe",
+  "project_actions_run",
+  "project_actions_status",
+  "project_actions_stop"
+]);
+
+export function isProjectActionTool(value) {
+  return typeof value === "string" && PROJECT_ACTION_TOOLS.has(value);
 }
 
 export function validateToolArguments(toolName, value) {
