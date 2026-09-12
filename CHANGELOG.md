@@ -2,7 +2,7 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
-## Unreleased
+## 1.5.2
 
 - Denied browser and device permissions on the default session: permission requests, permission checks, and device handlers now refuse, so plugin windows and shells cannot obtain camera, microphone, geolocation, or notification access. The built-in browser keeps its own separate partition policy.
 - Hardened packaged builds with Electron fuses that disable the `NODE_OPTIONS` environment variable and CLI inspect arguments and enable embedded asar integrity validation. `runAsNode` stays enabled on purpose because provider CLIs and the agent runtime spawn the bundled helpers through `ELECTRON_RUN_AS_NODE`; cookie encryption is not enabled because that transition is one-way.

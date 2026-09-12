@@ -2,7 +2,7 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
-## Unreleased
+## 1.5.2
 
 - 默认 session 现在拒绝浏览器与设备权限：权限请求、权限检查与设备处理器一律拒绝，因此 plugin 窗口和 shell 无法获得摄像头、麦克风、定位或通知权限。内置浏览器仍保留自身独立的 partition 策略。
 - 打包构建新增 Electron fuses 加固：关闭 `NODE_OPTIONS` 环境变量与 CLI inspect 参数，并启用 embedded asar 完整性校验。`runAsNode` 刻意保持启用，因为 provider CLI 与 agent runtime 会通过 `ELECTRON_RUN_AS_NODE` 启动随包分发的 helper 进程；cookie 加密未启用，因为该切换是单向的。
