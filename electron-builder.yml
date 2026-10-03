@@ -133,6 +133,9 @@ win:
   extraResources:
     - from: build/windows-agent-pipe-host/canvastty-windows-agent-pipe-host.exe
       to: agent-browser/canvastty-windows-agent-pipe-host.exe
+    # electron-rebuild places conpty.node here; node-pty loads its DLLs beside it.
+    - from: node_modules/node-pty/prebuilds/win32-${arch}/conpty
+      to: app.asar.unpacked/node_modules/node-pty/build/Release/conpty
   target:
     - nsis
     - portable
