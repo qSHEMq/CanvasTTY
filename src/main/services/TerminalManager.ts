@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
+import { platform } from "node:os";
 import { basename, dirname } from "node:path";
 import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import * as pty from "node-pty";
@@ -1533,7 +1534,8 @@ export class TerminalManager {
     }
     try {
       const process = this.spawnPty(spawn.command, spawn.args, {
-        name: "xterm-256color", cols, rows, cwd: planned.cwd, env: spawn.env
+        name: "xterm-256color", cols, rows, cwd: planned.cwd, env: spawn.env,
+        useConptyDll: platform() === "win32"
       });
       this.launchContexts.set(id, { cwd: planned.cwd, configDir: planned.env.CLAUDE_CONFIG_DIR ?? null });
       return {
@@ -2006,7 +2008,8 @@ export class TerminalManager {
     let process: IPty;
     try {
       process = this.spawnPty(spawn.command, spawn.args, {
-        name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
+        name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env,
+        useConptyDll: platform() === "win32"
       });
     } catch (error) {
       abandon();
